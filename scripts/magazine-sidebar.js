@@ -12,6 +12,8 @@
  * in sync as articles are added — the same pattern as magazine-cards.
  */
 
+import { loadCSS } from './aem.js';
+
 const INDEX_PATH = '/query-index.json';
 const MAGAZINE_PREFIX = '/us/en/magazine/';
 const SIDEBAR_COUNT = 4;
@@ -120,9 +122,18 @@ function buildRelated(articles) {
 export default async function decorateMagazineSidebar(main) {
   if (!isMagazineArticle()) return;
 
-  const section = main.querySelector('.section.writer-details-container')
-    || main.querySelector('.section');
+  // An article is normally one section, but gated articles split it into
+  // public / view=logged-in / view=logged-out sections. Lay out from the first
+  // section (hero + breadcrumb) and move every later section into the article
+  // column whole, so each keeps its data-view attribute.
+  const [section, ...moreSections] = [...main.querySelectorAll(':scope > .section')]
+    .filter((s) => s.children.length);
   if (!section || section.querySelector('.magazine-article-body')) return;
+  section.classList.add('magazine-article');
+
+  // the layout CSS ships with writer-details, which a gated page may not carry
+  // (e.g. the edge strips a writer-details (logged-in) block for anonymous users)
+  await loadCSS(`${window.hlx.codeBasePath}/blocks/writer-details/writer-details.css`);
 
   // Everything currently in the section, in order. The hero image (first
   // wrapper holding an img) and the breadcrumb wrapper stay full-width on top;
@@ -140,6 +151,7 @@ export default async function decorateMagazineSidebar(main) {
   const mainCol = document.createElement('div');
   mainCol.className = 'magazine-article-main';
   bodyWrappers.forEach((w) => mainCol.append(w));
+  moreSections.forEach((s) => mainCol.append(s));
 
   // Byline: the "By <author>" line renders bold + uppercase on wknd (it's an
   // <h4> there; our import made it a <p>). Tag it so CSS can style it.

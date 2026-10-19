@@ -17,7 +17,7 @@
 
 sitemaps:
   default:
-    origin: https://main--edscapstoneajay--ajayajju2412.aem.live
+    origin: https://main--eds-content-login--srinu3101.aem.live
     destination: /sitemap.xml
     languages:
       # both indexes are English content; hreflang is required on each language

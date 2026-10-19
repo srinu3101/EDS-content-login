@@ -87,4 +87,11 @@
     padding: 0;
     min-width: 0; /* allow the column to shrink so text wraps instead of clipping */
   }
+
+  /* sections after the trip layout (e.g. a gated article's logged-out teaser
+     and logged-in trip details) align to the same centred ~1136px column
+     instead of the sitewide 1680px width */
+  main > .section.adventure-meta-container ~ .section > div {
+    max-width: 1136px;
+  }
 }

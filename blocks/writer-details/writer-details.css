@@ -9,22 +9,25 @@
    article is a single section carrying the magazine-article blocks
    (breadcrumbs + quote + writer-details + social-links), so scope the column
    to that section: the hero image, breadcrumb, heading, body copy, byline and
-   share links all align to it instead of bleeding edge-to-edge. */
-main > .section.writer-details-container > div {
+   share links all align to it instead of bleeding edge-to-edge.
+   scripts/magazine-sidebar.js tags the article section .magazine-article — the
+   only hook on gated articles, whose first section has no writer-details. */
+main > .section.writer-details-container > div,
+main > .section.magazine-article > div {
   max-width: 1136px;
 }
 
 /* two-column article layout (built by scripts/magazine-sidebar.js): the hero
    image + breadcrumb stay full-width above; below, the article body sits in a
    ~776px left column with a ~291px sidebar on the right, matching wknd. */
-main > .section.writer-details-container > .magazine-article-body {
+main > .section.magazine-article > .magazine-article-body {
   max-width: 1136px;
   margin-inline: auto;
   padding: 0 32px;
 }
 
 @media (width >= 900px) {
-  main > .section.writer-details-container > .magazine-article-body {
+  main > .section.magazine-article > .magazine-article-body {
     display: grid;
     grid-template-columns: minmax(0, 776px) 291px;
     column-gap: 69px;
@@ -33,8 +36,9 @@ main > .section.writer-details-container > .magazine-article-body {
 }
 
 /* the left column's own wrappers must not re-apply the section's 152px gutters
-   (they're already inside the padded grid), so let them fill the column */
-main > .section.writer-details-container > .magazine-article-body .magazine-article-main > div {
+   (they're already inside the padded grid), so let them fill the column.
+   On gated articles these are whole sections moved in by the sidebar script. */
+main > .section.magazine-article > .magazine-article-body .magazine-article-main > div {
   max-width: none;
   margin-inline: 0;
   padding: 0;

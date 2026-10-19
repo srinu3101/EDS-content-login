@@ -1,0 +1,60 @@
+/*
+ * gated-content — premium content on a light card with a yellow accent bar and
+ * a small "Premium content" lock label (the wknd members-only accent); the
+ * logged-out public content sits in a dashed box inviting sign-in.
+ */
+.gated-content {
+  margin: 24px 0;
+}
+
+.gated-content:empty {
+  display: none;
+}
+
+.gated-content > div + div {
+  margin-top: 16px;
+}
+
+.gated-content .gated-content-premium,
+.gated-content .gated-content-public {
+  padding: 24px;
+}
+
+.gated-content .gated-content-premium {
+  border-left: 5px solid var(--accent-color);
+  background-color: var(--light-color);
+}
+
+.gated-content .gated-content-public {
+  border: 1px dashed #dadada;
+}
+
+.gated-content .gated-content-premium > :first-child,
+.gated-content .gated-content-public > :first-child {
+  margin-top: 0;
+}
+
+.gated-content .gated-content-premium > :last-child,
+.gated-content .gated-content-public > :last-child {
+  margin-bottom: 0;
+}
+
+/* "Premium content" with a padlock glyph, small uppercase like wknd's meta labels */
+.gated-content .gated-content-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--body-font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  text-transform: uppercase;
+  color: var(--text-color);
+}
+
+.gated-content .gated-content-label::before {
+  content: '';
+  width: 14px;
+  height: 14px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23202020'%3E%3Cpath d='M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5zm-3 8V6a3 3 0 0 1 6 0v3H9z'/%3E%3C/svg%3E") no-repeat center / contain;
+}
