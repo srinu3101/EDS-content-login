@@ -1,7 +1,7 @@
 /*
  * gated-content — premium content on a light card with a yellow accent bar and
  * a small "Premium content" lock label (the wknd members-only accent); the
- * logged-out public content sits in a dashed box inviting sign-in.
+ * public content everyone sees sits in a dashed box above it.
  */
 .gated-content {
   margin: 24px 0;

@@ -1,3 +1,5 @@
+import { decorateAuthLinks } from '../../scripts/gated.js';
+
 // media query match that indicates desktop width
 const isDesktop = window.matchMedia('(min-width: 900px)');
 
@@ -206,6 +208,9 @@ export default async function decorate(block) {
 
   // locale switcher: turn the static "en-US" link into a real dropdown
   buildLocaleSwitcher(nav);
+
+  // "Sign In" ⇄ "Sign Out" demo sign-in toggle (see scripts/gated.js)
+  decorateAuthLinks(nav);
 
   // hamburger for mobile
   const hamburger = document.createElement('div');

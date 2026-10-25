@@ -1,29 +1,28 @@
 # gated-content
 
-Premium content inside a page, plus optional public content for anonymous
-visitors. The block-level counterpart of section metadata
-`view = logged-in / logged-out`.
+Public content every visitor sees, plus premium content only signed-in
+visitors see. The block-level counterpart of section metadata
+`view = logged-in`.
 
 ## Authoring (Document Authoring)
 
 | Gated Content |  |
 | --- | --- |
-| Public Content | Sign in to see the full itinerary. [Sign In](/) |
+| Public Content | Intro or teaser everyone can read. |
 | Premium Content | Premium text, images, links… |
 
-- `Public Content` row: shown to logged-out visitors. Optional.
-- `Premium Content` row: shown to logged-in visitors. A single-cell row (no label) also counts as premium content.
+- `Public Content` row: shown to every visitor. Optional.
+- `Premium Content` row: shown to signed-in visitors only. A single-cell row (no label) also counts as premium content.
 - Rows can be in any order and repeated.
 - Set page metadata `gated = true` on any page that uses this block.
 
 ## Delivery
 
-The block does not hide anything in the browser. The Cloudflare edge worker
-removes the `Premium Content` rows for anonymous visitors (and the
-`Public Content` rows for signed-in visitors) before the page is delivered, so
-premium content never reaches anonymous users. The block renders whatever
-arrives, and its output parts carry `data-view="logged-out"` (public) /
-`data-view="logged-in"` (premium).
+Sign-in state comes from `scripts/gated.js` (demo sign-in cookie
+`wknd-signed-in`). For anonymous visitors the block drops the `Premium Content`
+rows in the browser, so they never display, but they are still in the page
+source. The Cloudflare edge worker is what removes them before delivery; it can
+read the same cookie. The premium part carries `data-view="logged-in"`.
 
 ## Supported variations
 

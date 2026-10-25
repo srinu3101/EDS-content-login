@@ -1,16 +1,17 @@
 /*
- * gated-content — premium content inside a page, with optional public content
- * for anonymous visitors. Protection happens at the edge, not here: the
- * Cloudflare worker strips the premium rows for anonymous users (and the
- * public rows for signed-in users) before the page is delivered. This block
- * only lays out whatever arrived, so it renders correctly with either part
- * missing.
+ * gated-content — public content everyone sees, plus premium content only
+ * signed-in visitors see (sign-in state from scripts/gated.js).
  *
  * Authored block, rows in any order:
- *   "Public Content"  | content  → shown to logged-out visitors
- *   "Premium Content" | content  → shown to logged-in visitors
+ *   "Public Content"  | content  → shown to every visitor
+ *   "Premium Content" | content  → shown to signed-in visitors only
  *   single-cell row              → premium content (the label is optional)
+ *
+ * The premium rows are dropped here in the browser; the Cloudflare edge worker
+ * is what keeps them out of the page source for anonymous visitors.
  */
+
+import { isSignedIn } from '../../scripts/gated.js';
 
 const PUBLIC = 'public content';
 const PREMIUM = 'premium content';
@@ -24,22 +25,24 @@ function readRow(row) {
   return { label: PREMIUM, cells };
 }
 
-function buildPart(className, view) {
+function buildPart(className) {
   const part = document.createElement('div');
   part.className = className;
-  // same audience marker the section-level `view` metadata produces
-  part.dataset.view = view;
   return part;
 }
 
 const hasContent = (el) => el.textContent.trim() || el.querySelector('picture, img');
 
 export default function decorate(block) {
-  const publicPart = buildPart('gated-content-public', 'logged-out');
-  const premiumPart = buildPart('gated-content-premium', 'logged-in');
+  const publicPart = buildPart('gated-content-public');
+  const premiumPart = buildPart('gated-content-premium');
+  // same audience marker the section-level `view` metadata produces
+  premiumPart.dataset.view = 'logged-in';
+  const signedIn = isSignedIn();
 
   [...block.children].forEach((row) => {
     const { label, cells } = readRow(row);
+    if (label === PREMIUM && !signedIn) return;
     const target = label === PUBLIC ? publicPart : premiumPart;
     cells.forEach((cell) => target.append(...cell.childNodes));
   });
@@ -51,6 +54,6 @@ export default function decorate(block) {
     premiumPart.prepend(badge);
   }
 
-  // empty when the edge removed the only part this visitor may not see
+  // empty (and hidden by CSS) when an anonymous visitor gets a premium-only block
   block.replaceChildren(...[publicPart, premiumPart].filter(hasContent));
 }

@@ -11,6 +11,7 @@ import {
   loadCSS,
   buildBlock,
 } from './aem.js';
+import { applyGating, decorateAuthLinks } from './gated.js';
 
 if (window.trustedTypes && window.trustedTypes.createPolicy) {
   const innerTT = window.trustedTypes.createPolicy('tt-inner', {
@@ -220,10 +221,12 @@ export function decorateMain(main) {
   splitHomepageSections(main);
   decorateIcons(main);
   buildAutoBlocks(main);
+  applyGating(main);
   decorateSections(main);
   applySectionMetadata(main);
   decorateBlocks(main);
   decorateButtons(main);
+  decorateAuthLinks(main);
 }
 
 /**
