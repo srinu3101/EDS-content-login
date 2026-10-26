@@ -9,9 +9,11 @@
  *
  * The premium rows are dropped here in the browser; the Cloudflare edge worker
  * is what keeps them out of the page source for anonymous visitors.
+ * Sign In / Sign Up links are removed from public content: signing in happens
+ * from the header only.
  */
 
-import { isSignedIn } from '../../scripts/gated.js';
+import { isAuthLink, isSignedIn } from '../../scripts/gated.js';
 
 const PUBLIC = 'public content';
 const PREMIUM = 'premium content';
@@ -33,6 +35,17 @@ function buildPart(className) {
 
 const hasContent = (el) => el.textContent.trim() || el.querySelector('picture, img');
 
+// drop sign-in links (and a paragraph left holding nothing but the link)
+function removeAuthLinks(part) {
+  part.querySelectorAll('a').forEach((a) => {
+    if (!isAuthLink(a)) return;
+    const holder = a.closest('p');
+    const onlyLink = holder && part.contains(holder)
+      && holder.textContent.trim() === a.textContent.trim();
+    (onlyLink ? holder : a).remove();
+  });
+}
+
 export default function decorate(block) {
   const publicPart = buildPart('gated-content-public');
   const premiumPart = buildPart('gated-content-premium');
@@ -46,6 +59,7 @@ export default function decorate(block) {
     const target = label === PUBLIC ? publicPart : premiumPart;
     cells.forEach((cell) => target.append(...cell.childNodes));
   });
+  removeAuthLinks(publicPart);
 
   if (hasContent(premiumPart)) {
     const badge = document.createElement('p');

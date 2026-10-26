@@ -1,5 +1,5 @@
 /*
- * gated — demo sign-in and audience gating for gated content.
+ * gated — sign-in links and audience gating for gated content.
  *
  * Audience markers authored in DA:
  *   section metadata `view` = logged-in | logged-out  → data-view on the section
@@ -11,16 +11,17 @@
  * This runs in the browser, so premium markup still reaches the page source;
  * keeping it from anonymous users is the Cloudflare edge worker's job.
  *
- * Sign-in: behind the Cloudflare worker, "Sign Up" / "Sign In" / "Sign Out"
- * go to the worker's Auth0 routes (/auth/signup, /auth/login, /auth/logout),
- * which set a signed session plus the `wknd-signed-in` hint cookie read here.
- * Adobe's own hosts (*.aem.page / *.aem.live) and local dev have no worker,
- * so there the links stay a demo toggle of the hint cookie — no accounts or
- * passwords.
+ * Sign-in only ever happens through Auth0 in the Cloudflare worker
+ * (/auth/login, /auth/logout), which sets a signed session plus the
+ * `wknd-signed-in` hint cookie read here. Nothing in the browser can sign a
+ * visitor in. Adobe's own hosts (*.aem.page / *.aem.live) and local dev have no
+ * worker, so their Sign In links go to the worker's login on EDGE_ORIGIN.
  */
 
 import { toClassName } from './aem.js';
 
+// public address of the Cloudflare worker (update when a custom domain is added)
+const EDGE_ORIGIN = 'https://eds-content-login.vanterusrinivasuluv2002.workers.dev';
 const COOKIE = 'wknd-signed-in';
 const SIGN_IN = /^sign\s*in$/i;
 const SIGN_OUT = /^sign\s*out$/i;
@@ -35,10 +36,13 @@ export function isSignedIn() {
   return document.cookie.split(';').some((c) => c.trim() === `${COOKIE}=true`);
 }
 
-function setSignedIn(signedIn) {
-  document.cookie = signedIn
-    ? `${COOKIE}=true; path=/; SameSite=Lax`
-    : `${COOKIE}=; path=/; max-age=0; SameSite=Lax`;
+/**
+ * Whether a link is a "Sign In" / "Sign Up" / "Sign Out" link.
+ * @param {HTMLAnchorElement} a The link
+ */
+export function isAuthLink(a) {
+  const label = a.textContent.trim();
+  return SIGN_IN.test(label) || SIGN_OUT.test(label) || SIGN_UP.test(label);
 }
 
 /**
@@ -58,61 +62,23 @@ export function applyGating(main) {
 }
 
 /**
- * Send a link to a worker auth route, or make it the demo toggle (setting the
- * hint cookie to `signIn`) where there is no worker.
- * @param {HTMLAnchorElement} a The link
- * @param {string} route Worker route: login, signup or logout
- * @param {boolean} signIn Demo toggle target state
- */
-function wireAuthLink(a, route, signIn) {
-  if (hasEdgeSignIn()) {
-    a.href = `/auth/${route}?returnTo=${encodeURIComponent(window.location.pathname)}`;
-    return;
-  }
-  a.addEventListener('click', (e) => {
-    e.preventDefault();
-    setSignedIn(signIn);
-    window.location.reload();
-  });
-}
-
-/**
- * Point "Sign Up" / "Sign In" / "Sign Out" links at the worker's Auth0 routes
- * (or the demo toggle where there is no worker), labelled for the current
- * state. "Sign Up" links are hidden for visitors who are already signed in.
+ * Point "Sign In" / "Sign Out" (and authored "Sign Up") links at the worker's
+ * Auth0 routes, labelled for the current state. "Sign Up" links are hidden for
+ * visitors who are already signed in.
  * @param {Element} root Element to search for links (nav, main, …)
  */
 export function decorateAuthLinks(root) {
   const signedIn = isSignedIn();
+  const origin = hasEdgeSignIn() ? '' : EDGE_ORIGIN;
+  const returnTo = encodeURIComponent(window.location.pathname);
   root.querySelectorAll('a').forEach((a) => {
-    const label = a.textContent.trim();
-    if (SIGN_UP.test(label)) {
+    if (!isAuthLink(a)) return;
+    if (SIGN_UP.test(a.textContent.trim())) {
       if (signedIn) (a.closest('li') || a).hidden = true;
-      else wireAuthLink(a, 'signup', true);
+      else a.href = `${origin}/auth/signup?returnTo=${returnTo}`;
       return;
     }
-    if (!SIGN_IN.test(label) && !SIGN_OUT.test(label)) return;
     a.textContent = signedIn ? 'Sign Out' : 'Sign In';
-    wireAuthLink(a, signedIn ? 'logout' : 'login', !signedIn);
+    a.href = `${origin}/auth/${signedIn ? 'logout' : 'login'}?returnTo=${returnTo}`;
   });
-}
-
-/**
- * Add a "Sign Up" link next to the header's "Sign In" for anonymous visitors
- * (unless the nav already has one). Run after decorateAuthLinks.
- * @param {Element} nav The decorated header nav
- */
-export function addSignUpLink(nav) {
-  if (isSignedIn()) return;
-  const links = [...nav.querySelectorAll('a')];
-  if (links.some((a) => SIGN_UP.test(a.textContent.trim()))) return;
-  const signInItem = links.find((a) => SIGN_IN.test(a.textContent.trim()))?.closest('li');
-  if (!signInItem) return;
-  const item = document.createElement('li');
-  const a = document.createElement('a');
-  a.href = '/';
-  a.textContent = 'Sign Up';
-  wireAuthLink(a, 'signup', true);
-  item.append(a);
-  signInItem.after(item);
 }
