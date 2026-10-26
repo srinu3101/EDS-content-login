@@ -183,6 +183,8 @@ const handleAuth = async (request, url, env) => {
       scope: 'openid profile email',
       state,
       nonce,
+      // always ask for credentials, even if Auth0 still remembers the visitor
+      prompt: 'login',
     });
     if (url.pathname === '/auth/signup') params.set('screen_hint', 'signup');
     authorize.search = params.toString();

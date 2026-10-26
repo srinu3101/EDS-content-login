@@ -18,8 +18,10 @@ visitors see. The block-level counterpart of section metadata
 
 ## Delivery
 
-Sign-in state comes from `scripts/gated.js` (demo sign-in cookie
-`wknd-signed-in`). For anonymous visitors the block drops the `Premium Content`
+Sign-in state comes from `scripts/gated.js` (the `wknd-signed-in` hint
+cookie, set only after a real Auth0 login in the Cloudflare worker). Sign In /
+Sign Up links authored inside Public Content are removed: visitors sign in from
+the header. For anonymous visitors the block drops the `Premium Content`
 rows in the browser, so they never display, but they are still in the page
 source. The Cloudflare edge worker is what removes them before delivery; it can
 read the same cookie. The premium part carries `data-view="logged-in"`.

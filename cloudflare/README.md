@@ -6,8 +6,9 @@ plus:
 - **Auth0 sign-up and sign-in** — `/auth/signup`, `/auth/login`,
   `/auth/callback`, `/auth/logout`. After a real sign-up or login the worker
   sets a signed, HttpOnly session cookie (`wknd-session`) that page scripts
-  can't read or forge. The site header shows **Sign In** + **Sign Up** for
-  visitors and **Sign Out** for members.
+  can't read or forge. Auth0 always asks for credentials (`prompt=login`).
+  The site header shows **Sign In** for visitors (Auth0's login page links to
+  sign-up) and **Sign Out** for members.
 - **Edge gating** — anonymous visitors never receive premium content in the
   page source; signed-in visitors get public + premium.
 
@@ -56,9 +57,10 @@ This folder is in `.hlxignore`, so it is kept in git but not published.
 
 ## 3. Test
 
-1. Open `https://eds-content-login.<subdomain>.workers.dev/us/en` → **Sign Up**
-   → Auth0 sign-up page → create an account → back on the page, header shows
-   **Sign Out**. **Sign Out**, then **Sign In** with the same account.
+1. Open `https://eds-content-login.<subdomain>.workers.dev/us/en` → **Sign In**
+   → Auth0 login page → **Sign up** link → create an account → back on the
+   page, header shows **Sign Out**. **Sign Out**, then **Sign In** with the
+   same account.
 2. A gated page shows premium content; **Sign Out** → public only.
 3. Signed out, view source of a gated page: no premium text.
 
@@ -75,6 +77,7 @@ This folder is in `.hlxignore`, so it is kept in git but not published.
   `wknd-signed-in=true` alone counts as signed in. Not secure.
 - Applies to pages and `/page.plain.html`; `/page.md` returns 404. Gated
   responses are `private, no-store` with `Vary: Cookie`.
-- On `*.aem.page` / `*.aem.live` (no worker) the site's Sign In stays a demo
-  toggle for authors' previews. Protect those hosts with site authentication
-  and set `ORIGIN_AUTHENTICATION`, otherwise they bypass this worker.
+- On `*.aem.page` / `*.aem.live` (no worker) the site's Sign In sends visitors
+  to this worker's login (`EDGE_ORIGIN` in `scripts/gated.js`); nothing there
+  unlocks premium content. Protect those hosts with site authentication and
+  set `ORIGIN_AUTHENTICATION`, otherwise their page source bypasses this worker.
