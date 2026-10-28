@@ -61,13 +61,6 @@ export default function decorate(block) {
   });
   removeAuthLinks(publicPart);
 
-  if (hasContent(premiumPart)) {
-    const badge = document.createElement('p');
-    badge.className = 'gated-content-label';
-    badge.textContent = 'Premium content';
-    premiumPart.prepend(badge);
-  }
-
   // empty (and hidden by CSS) when an anonymous visitor gets a premium-only block
   block.replaceChildren(...[publicPart, premiumPart].filter(hasContent));
 }

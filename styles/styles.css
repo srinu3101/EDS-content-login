@@ -351,6 +351,13 @@ main .section.light-grey {
   padding: 40px 0;
 }
 
+/* section metadata style "divider": a thin rule separating the section from
+   the one above (used e.g. for logged-in sections of gated pages) */
+main .section.divider {
+  border-top: 1px solid #dadada;
+  padding-top: 40px;
+}
+
 /* faq section: two columns on desktop — main flow (title + intro + accordion)
    on the left, the "Need more help?" sidebar on the right. The section's
    wrappers (default-content, accordion, faq-sidebar) are the grid items.
