@@ -368,6 +368,21 @@ const gateHtml = (html, signedIn, teaserPath) => {
   return out + html.slice(pos);
 };
 
+// LOCKED ORIGIN: indexes (e.g. query-index.json) hold absolute origin URLs
+// such as image links. With site authentication on, the browser can't load
+// those directly — point them at this worker instead.
+const rewriteOriginUrls = async (request, resp, env, extension) => {
+  if (extension !== 'json' || resp.status !== 200) return resp;
+  const origin = `https://${env.ORIGIN_HOSTNAME}`;
+  const json = await resp.text();
+  if (!json.includes(origin)) return new Response(json, resp);
+  const self = new URL(request.url).origin;
+  const out = new Response(json.split(origin).join(self), resp);
+  out.headers.delete('content-length');
+  out.headers.delete('etag');
+  return out;
+};
+
 const applyGating = async (request, resp, env, extension) => {
   if (!isPageRequest(extension) || resp.status !== 200) return resp;
   if (!(resp.headers.get('content-type') || '').includes('text/html')) return resp;
@@ -499,6 +514,7 @@ const handleRequest = async (request, env, ctx) => {
   }
   resp.headers.delete('age');
   resp.headers.delete('x-robots-tag');
+  resp = await rewriteOriginUrls(request, resp, env, extension);
   // GATING: tailor the page to this visitor before it leaves Cloudflare
   return applyGating(request, resp, env, extension);
 };
