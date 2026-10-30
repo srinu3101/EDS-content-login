@@ -24,6 +24,8 @@
  *                                  HMAC-signed HttpOnly session cookie set
  *   /auth/logout?returnTo=/path  → session cleared, Auth0 session ended
  *   /auth/logged-out             → back to the page the visitor left from
+ *   /auth/me                     → JSON { signedIn, name, username, email,
+ *                                  picture } from the session (never cached)
  * The session cookie `wknd-session` can't be read or forged by page scripts.
  * `wknd-signed-in=true` is a plain hint cookie so the site's header can show
  * "Sign Out"; it unlocks nothing. Without the AUTH0_* / SESSION_SECRET
@@ -42,6 +44,11 @@
  *   - applies to pages and their .plain.html; .md is refused
  *   - optional LOGIN_TEASER (e.g. /fragments/login-teaser) is inserted where
  *     the first premium section was removed
+ *
+ * LOCKED PAGES: everything under /premium/ is for signed-in visitors only.
+ * Anonymous page views are sent to /auth/login (and back); other requests
+ * (.plain.html, images) get 401. The user-details block loads its premium
+ * content from such a page, so that content is never part of a public page.
  *
  * Environment variables:
  *   ORIGIN_HOSTNAME    main--eds-content-login--srinu3101.aem.live
@@ -164,7 +171,27 @@ const readIdToken = (idToken) => {
   }
 };
 
+const meResponse = (body) => new Response(JSON.stringify(body), {
+  headers: { 'content-type': 'application/json', 'cache-control': 'private, no-store' },
+});
+
+// GET /auth/me → who is signed in, read from the signed session on every call
+// (blocks such as user-details ask this instead of trusting page markup)
+const handleMe = async (request, env) => {
+  const config = authConfig(env);
+  if (!config) return meResponse({ signedIn: getCookie(request, SIGNED_IN_COOKIE) === 'true' });
+  const session = await verifyValue(config.secret, getCookie(request, SESSION_COOKIE));
+  if (!session) return meResponse({ signedIn: false });
+  const {
+    name = '', username = '', email = '', picture = '',
+  } = session;
+  return meResponse({
+    signedIn: true, name, username, email, picture,
+  });
+};
+
 const handleAuth = async (request, url, env) => {
+  if (url.pathname === '/auth/me') return handleMe(request, env);
   const config = authConfig(env);
   if (!config) return new Response('Sign-in is not configured', { status: 404 });
   const origin = `${url.protocol}//${url.host}`;
@@ -228,6 +255,10 @@ const handleAuth = async (request, url, env) => {
     const session = await signValue(config.secret, {
       sub: claims.sub,
       name: claims.name || claims.email || '',
+      // profile shown by the user-details block through /auth/me
+      username: claims.nickname || '',
+      email: claims.email || '',
+      picture: claims.picture || '',
       exp: nowSeconds() + SESSION_SECONDS,
     });
     return redirect(`${origin}${pending.returnTo}`, [
@@ -263,6 +294,39 @@ const isSignedIn = async (request, env) => {
 };
 
 /* -------------------------------------------------------------- END AUTH */
+
+/* ---------------------------------------------------------- LOCKED PAGES */
+
+// Whole documents only signed-in visitors may open, e.g. /premium/my-account:
+// the user-details block loads them (as .plain.html) after sign-in, and they
+// can be opened directly too. Anonymous visitors never reach the origin.
+const LOCKED_PREFIX = '/premium/';
+
+const isLockedPath = (path) => path === '/premium' || path.startsWith(LOCKED_PREFIX);
+
+// anonymous: a page opened directly → sign in first, then back to the page;
+// anything else (.plain.html, images, …) → 401
+const lockedResponse = (url) => {
+  const extension = getExtension(url.pathname);
+  if ((extension === '' || extension === 'html') && !url.pathname.endsWith('.plain.html')) {
+    return redirect(`/auth/login?returnTo=${encodeURIComponent(url.pathname)}`);
+  }
+  return new Response('Sign in to see this content', {
+    status: 401,
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'private, no-store' },
+  });
+};
+
+// a signed-in visitor's copy must never be cached for anyone else
+const makePrivate = (resp) => {
+  resp.headers.set('cache-control', 'private, no-store');
+  resp.headers.append('vary', 'Cookie');
+  resp.headers.delete('etag');
+  resp.headers.delete('last-modified');
+  return resp;
+};
+
+/* ------------------------------------------------------ END LOCKED PAGES */
 
 /* ---------------------------------------------------------------- GATING */
 
@@ -437,6 +501,12 @@ const handleRequest = async (request, env, ctx) => {
     return handleAuth(request, url, env);
   }
 
+  // LOCKED PAGES: /premium/* only for signed-in visitors
+  const locked = isLockedPath(url.pathname);
+  if (locked && !(await isSignedIn(request, env))) {
+    return lockedResponse(url);
+  }
+
   if(isRUMRequest(url)) {
     // only allow GET, POST, OPTIONS
     if(!['GET', 'POST', 'OPTIONS'].includes(request.method)) {
@@ -516,7 +586,8 @@ const handleRequest = async (request, env, ctx) => {
   resp.headers.delete('x-robots-tag');
   resp = await rewriteOriginUrls(request, resp, env, extension);
   // GATING: tailor the page to this visitor before it leaves Cloudflare
-  return applyGating(request, resp, env, extension);
+  resp = await applyGating(request, resp, env, extension);
+  return locked ? makePrivate(resp) : resp;
 };
 
 export default {
