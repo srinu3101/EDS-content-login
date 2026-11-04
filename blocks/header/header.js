@@ -1,4 +1,4 @@
-import { decorateAuthLinks } from '../../scripts/gated.js';
+import { decorateAuthLinks, isSignedIn } from '../../scripts/gated.js';
 
 // media query match that indicates desktop width
 const isDesktop = window.matchMedia('(min-width: 900px)');
@@ -201,6 +201,16 @@ export default async function decorate(block) {
         a.closest('li')?.classList.add('nav-active');
       }
     });
+
+    // links to pages behind login (/members/…) only show once signed in; the
+    // Cloudflare worker still locks the pages themselves
+    if (!isSignedIn()) {
+      navSections.querySelectorAll('a[href]').forEach((a) => {
+        let dest;
+        try { dest = new URL(a.href, window.location.origin).pathname; } catch { return; }
+        if (dest === '/members' || dest.startsWith('/members/')) (a.closest('li') || a).remove();
+      });
+    }
 
     // search box lives in the nav row (right of the primary links), matching source
     navSections.append(buildSearch());

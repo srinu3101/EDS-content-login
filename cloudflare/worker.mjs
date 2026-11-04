@@ -45,7 +45,8 @@
  *   - optional LOGIN_TEASER (e.g. /fragments/login-teaser) is inserted where
  *     the first premium section was removed
  *
- * LOCKED PAGES: everything under /premium/ is for signed-in visitors only.
+ * LOCKED PAGES: everything under /premium/ and /members/ is for signed-in
+ * visitors only (/members/ holds the pages behind login).
  * Anonymous page views are sent to /auth/login (and back); other requests
  * (.plain.html, images) get 401. The user-details block loads its premium
  * content from such a page, so that content is never part of a public page.
@@ -297,12 +298,14 @@ const isSignedIn = async (request, env) => {
 
 /* ---------------------------------------------------------- LOCKED PAGES */
 
-// Whole documents only signed-in visitors may open, e.g. /premium/my-account:
-// the user-details block loads them (as .plain.html) after sign-in, and they
-// can be opened directly too. Anonymous visitors never reach the origin.
-const LOCKED_PREFIX = '/premium/';
+// Whole documents only signed-in visitors may open: /premium/… (premium
+// content the user-details block loads after sign-in) and /members/… (pages
+// behind login, e.g. /members/trips, /members/profile). Anonymous visitors
+// never reach the origin.
+const LOCKED_FOLDERS = ['/premium', '/members'];
 
-const isLockedPath = (path) => path === '/premium' || path.startsWith(LOCKED_PREFIX);
+const isLockedPath = (path) => LOCKED_FOLDERS
+  .some((folder) => path === folder || path.startsWith(`${folder}/`));
 
 // anonymous: a page opened directly → sign in first, then back to the page;
 // anything else (.plain.html, images, …) → 401
@@ -501,7 +504,7 @@ const handleRequest = async (request, env, ctx) => {
     return handleAuth(request, url, env);
   }
 
-  // LOCKED PAGES: /premium/* only for signed-in visitors
+  // LOCKED PAGES: /premium/* and /members/* only for signed-in visitors
   const locked = isLockedPath(url.pathname);
   if (locked && !(await isSignedIn(request, env))) {
     return lockedResponse(url);
