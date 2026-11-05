@@ -15,10 +15,35 @@ import {
   PRODUCTS_PATH, PRODUCT_PAGE, buildPrice, fetchProducts, productUrl, readConfig, sitePath,
   stockLabel,
 } from '../../scripts/products.js';
+import { MAX_QTY, addToCart } from '../../scripts/cart.js';
+
+// one-click "Add to Cart" (quantity 1); the block's live region announces it
+function buildAddButton(product, announce) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'button secondary product-list-add';
+  const max = Math.min(product.stock === null ? MAX_QTY : product.stock, MAX_QTY);
+  if (max <= 0) {
+    button.disabled = true;
+    button.textContent = 'Out of stock';
+    return button;
+  }
+  button.textContent = 'Add to Cart';
+  button.setAttribute('aria-label', `Add ${product.name} to cart`);
+  let timer;
+  button.addEventListener('click', () => {
+    const now = addToCart(product.sku, 1, max);
+    announce(`${product.name}: ${now} in your cart.`);
+    button.textContent = 'Added ✓';
+    clearTimeout(timer);
+    timer = setTimeout(() => { button.textContent = 'Add to Cart'; }, 1500);
+  });
+  return button;
+}
 
 const toKey = (s) => (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-function buildCard(product, page) {
+function buildCard(product, page, announce) {
   const li = document.createElement('li');
   li.className = 'product-list-card';
   li.dataset.category = toKey(product.category);
@@ -52,7 +77,7 @@ function buildCard(product, page) {
   const stockEl = document.createElement('p');
   stockEl.className = `product-stock product-stock-${stock.state}`;
   stockEl.textContent = stock.text;
-  body.append(title, buildPrice(product), stockEl);
+  body.append(title, buildPrice(product), stockEl, buildAddButton(product, announce));
 
   li.append(imageCell, body);
   return li;
@@ -80,9 +105,14 @@ export default async function decorate(block) {
     return;
   }
 
+  const live = document.createElement('p');
+  live.className = 'product-list-live';
+  live.setAttribute('role', 'status');
+  const announce = (text) => { live.textContent = text; };
+
   const grid = document.createElement('ul');
   grid.className = 'product-list-grid';
-  products.forEach((p) => grid.append(buildCard(p, page)));
+  products.forEach((p) => grid.append(buildCard(p, page, announce)));
 
   if (!fixed) {
     const categories = [...new Map(products
@@ -121,5 +151,5 @@ export default async function decorate(block) {
     block.append(filters, count);
   }
 
-  block.append(grid);
+  block.append(grid, live);
 }

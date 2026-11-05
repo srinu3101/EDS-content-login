@@ -143,6 +143,21 @@
   color: #6e6e6e;
 }
 
+.product-list .product-list-add {
+  margin-top: 16px;
+  padding: 10px 20px;
+}
+
+/* screen-reader announcement of "added to cart" */
+.product-list .product-list-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .product-list .product-list-message {
   margin: 0;
   padding: 24px;

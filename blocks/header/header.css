@@ -564,3 +564,31 @@ header nav[aria-expanded='true'] .nav-tools a {
       'brand sections' 72px / auto 1fr;
   }
 }
+
+/* shop cart link in the utility bar: icon + label + item count badge */
+header nav .nav-tools .nav-cart a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+header nav .nav-tools .nav-cart img {
+  width: 18px;
+  height: 18px;
+}
+
+header nav .nav-tools .nav-cart-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background-color: var(--accent-color);
+  color: var(--text-color);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+header nav .nav-tools .nav-cart-count[hidden] {
+  display: none;
+}

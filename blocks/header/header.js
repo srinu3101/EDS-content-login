@@ -1,4 +1,5 @@
 import { decorateAuthLinks, isSignedIn } from '../../scripts/gated.js';
+import { CART_PAGE, countItems } from '../../scripts/cart.js';
 
 // media query match that indicates desktop width
 const isDesktop = window.matchMedia('(min-width: 900px)');
@@ -121,6 +122,39 @@ function buildLocaleSwitcher(nav) {
 }
 
 /**
+ * Shop cart link with the number of items, first in the utility bar; it
+ * follows the cart (scripts/cart.js) through `cart:change` events.
+ * @param {HTMLElement} nav the decorated <nav>
+ */
+function buildCartLink(nav) {
+  const list = nav.querySelector('.nav-tools ul:not(.nav-locale-list)');
+  if (!list) return;
+  const li = document.createElement('li');
+  li.className = 'nav-cart';
+  const a = document.createElement('a');
+  a.href = CART_PAGE;
+  const icon = document.createElement('img');
+  icon.src = '/icons/cart.svg';
+  icon.alt = '';
+  icon.width = 18;
+  icon.height = 18;
+  const label = document.createElement('span');
+  label.textContent = 'Cart';
+  const badge = document.createElement('span');
+  badge.className = 'nav-cart-count';
+  const update = (count) => {
+    badge.textContent = String(count);
+    badge.hidden = count === 0;
+    a.setAttribute('aria-label', `Cart, ${count} ${count === 1 ? 'item' : 'items'}`);
+  };
+  update(countItems());
+  window.addEventListener('cart:change', (e) => update(e.detail.count));
+  a.append(icon, label, badge);
+  li.append(a);
+  list.prepend(li);
+}
+
+/**
  * Build the search form (form controls are created in JS, never in the fragment).
  * @returns {HTMLElement} the search form element
  */
@@ -222,6 +256,9 @@ export default async function decorate(block) {
   // Sign In ⇄ Sign Out, always through Auth0 in the Cloudflare worker
   // (see scripts/gated.js)
   decorateAuthLinks(nav);
+
+  // shop cart with item count, before Sign In
+  buildCartLink(nav);
 
   // hamburger for mobile
   const hamburger = document.createElement('div');

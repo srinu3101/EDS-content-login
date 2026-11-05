@@ -14,6 +14,55 @@ import { createOptimizedPicture } from '../../scripts/aem.js';
 import {
   PRODUCTS_PATH, SHOP_PAGE, buildPrice, fetchProducts, readConfig, sitePath, stockLabel,
 } from '../../scripts/products.js';
+import {
+  CART_PAGE, MAX_QTY, addToCart, getCart,
+} from '../../scripts/cart.js';
+
+// quantity picker + "Add to Cart", with a status line linking to the cart
+function buildPurchase(product) {
+  const wrap = document.createElement('div');
+  wrap.className = 'product-details-buy';
+  const max = Math.min(product.stock === null ? MAX_QTY : product.stock, MAX_QTY);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'button primary';
+  if (max <= 0) {
+    button.disabled = true;
+    button.textContent = 'Out of stock';
+    wrap.append(button);
+    return wrap;
+  }
+
+  const label = document.createElement('label');
+  label.htmlFor = 'product-details-qty';
+  label.textContent = 'Quantity';
+  const select = document.createElement('select');
+  select.id = 'product-details-qty';
+  for (let n = 1; n <= max; n += 1) select.add(new Option(String(n), String(n)));
+  button.textContent = 'Add to Cart';
+  const status = document.createElement('p');
+  status.className = 'product-details-status';
+  status.setAttribute('role', 'status');
+
+  button.addEventListener('click', () => {
+    const wanted = Number(select.value);
+    const before = (getCart().find((l) => l.sku === product.sku) || { qty: 0 }).qty;
+    const now = addToCart(product.sku, wanted, max);
+    const added = now - before;
+    const cartLink = document.createElement('a');
+    cartLink.href = CART_PAGE;
+    cartLink.textContent = 'View cart';
+    status.replaceChildren(
+      added > 0
+        ? `Added ${added} to your cart (${now} in cart). `
+        : `You already have the maximum of ${now} in your cart. `,
+      cartLink,
+    );
+  });
+
+  wrap.append(label, select, button, status);
+  return wrap;
+}
 
 function backLink(shop) {
   const p = document.createElement('p');
@@ -82,7 +131,7 @@ export default async function decorate(block) {
   const stockEl = document.createElement('p');
   stockEl.className = `product-stock product-stock-${stock.state}`;
   stockEl.textContent = stock.text;
-  info.append(stockEl);
+  info.append(stockEl, buildPurchase(product));
 
   if (product.description) {
     const desc = document.createElement('p');
