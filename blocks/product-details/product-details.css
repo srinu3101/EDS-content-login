@@ -1,0 +1,128 @@
+/*
+ * product-details — large product photo next to the product info on desktop,
+ * stacked on mobile; price styling matches product-list.
+ */
+.product-details {
+  display: grid;
+  gap: 32px;
+  max-width: 1136px;
+  margin-inline: auto;
+
+  /* the block is usually the page's first section, which has no top margin */
+  padding-top: 40px;
+}
+
+.product-details[aria-busy="true"] {
+  min-height: 480px;
+}
+
+@media (width >= 900px) {
+  .product-details {
+    grid-template-columns: 3fr 2fr;
+    align-items: start;
+    gap: 48px;
+  }
+
+  .product-details:has(.product-details-missing) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.product-details .product-details-media {
+  line-height: 0;
+}
+
+.product-details .product-details-media img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.product-details .product-details-category,
+.product-details .product-details-sku {
+  margin: 0;
+  color: #6e6e6e;
+  font-size: var(--body-font-size-xs);
+  text-transform: uppercase;
+}
+
+.product-details h1 {
+  margin: 4px 0 8px;
+}
+
+.product-details .product-price {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: baseline;
+  margin: 24px 0 0;
+}
+
+.product-details .product-price-regular {
+  font-size: var(--heading-font-size-l);
+  font-weight: 600;
+}
+
+.product-details .product-price-member {
+  padding: 2px 8px;
+  background-color: var(--accent-color);
+  font-size: var(--body-font-size-s);
+  font-weight: 600;
+}
+
+.product-details .product-stock {
+  margin: 12px 0 0;
+  font-size: var(--body-font-size-s);
+}
+
+.product-details .product-stock-in {
+  color: #2d7a5f;
+}
+
+.product-details .product-stock-low {
+  color: #b35c00;
+}
+
+.product-details .product-stock-out {
+  color: #6e6e6e;
+}
+
+.product-details .product-details-buy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: center;
+  margin-top: 24px;
+}
+
+.product-details .product-details-buy label {
+  font-weight: 600;
+}
+
+.product-details .product-details-buy select {
+  min-width: 72px;
+  height: 48px;
+  padding: 0 12px;
+  border: 1px solid #6e6e6e;
+  border-radius: 0;
+  background-color: var(--background-color);
+}
+
+.product-details .product-details-status {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--body-font-size-s);
+}
+
+.product-details .product-details-status:empty {
+  display: none;
+}
+
+.product-details .product-details-description {
+  margin: 24px 0 0;
+}
+
+.product-details .product-details-back {
+  margin: 32px 0 0;
+  font-size: var(--body-font-size-s);
+}

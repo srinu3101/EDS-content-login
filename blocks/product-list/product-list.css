@@ -1,0 +1,165 @@
+/*
+ * product-list — filter tabs + product card grid; same look as
+ * adventures-filter (uppercase tabs, dark active tab, bordered cards).
+ */
+.product-list {
+  max-width: 1136px;
+  margin-inline: auto;
+}
+
+/* the page title and intro (default content in the same section) line up
+   with the 1136px grid, as on the adventures page */
+.product-list-container .default-content-wrapper {
+  max-width: 1136px;
+  margin-inline: auto;
+}
+
+.product-list[aria-busy="true"] {
+  min-height: 400px;
+}
+
+.product-list .product-list-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5ch;
+  margin-bottom: 8px;
+  font-size: var(--body-font-size-xs);
+}
+
+.product-list .product-list-filter {
+  margin: 0;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.product-list .product-list-filter[aria-pressed="true"] {
+  background-color: var(--text-color);
+  color: var(--background-color);
+}
+
+.product-list .product-list-count {
+  margin: 0 0 16px;
+  color: #6e6e6e;
+  font-size: var(--body-font-size-xs);
+}
+
+.product-list .product-list-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(257px, 1fr));
+  gap: 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.product-list .product-list-card {
+  border: 1px solid #dadada;
+  background-color: var(--background-color);
+}
+
+.product-list .product-list-card[hidden] {
+  display: none;
+}
+
+.product-list .product-list-card-image {
+  line-height: 0;
+}
+
+.product-list .product-list-card-image img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.product-list .product-list-card-body {
+  margin: 16px;
+}
+
+.product-list .product-list-card-category {
+  margin: 0 0 4px;
+  color: #6e6e6e;
+  font-size: var(--body-font-size-xs);
+  text-transform: uppercase;
+}
+
+.product-list .product-list-card-body h2 {
+  margin: 0 0 8px;
+  font-family: var(--body-font-family);
+  font-size: var(--body-font-size-m);
+  font-weight: 600;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.product-list .product-list-card-body h2 a:any-link {
+  color: var(--text-color);
+  text-decoration: none;
+}
+
+.product-list .product-list-card-body h2 a:hover {
+  color: var(--link-color);
+}
+
+.product-list .product-price {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  margin: 0;
+}
+
+.product-list .product-price-regular {
+  font-size: var(--body-font-size-m);
+  font-weight: 600;
+}
+
+.product-list .product-price-member {
+  padding: 0 6px;
+  background-color: var(--accent-color);
+  font-size: var(--body-font-size-xs);
+  font-weight: 600;
+}
+
+.product-list .product-stock {
+  margin: 8px 0 0;
+  font-size: var(--body-font-size-xs);
+}
+
+.product-list .product-stock-in {
+  color: #2d7a5f;
+}
+
+.product-list .product-stock-low {
+  color: #b35c00;
+}
+
+.product-list .product-stock-out {
+  color: #6e6e6e;
+}
+
+.product-list .product-list-add {
+  margin-top: 16px;
+  padding: 10px 20px;
+}
+
+/* screen-reader announcement of "added to cart" */
+.product-list .product-list-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.product-list .product-list-message {
+  margin: 0;
+  padding: 24px;
+  border: 1px dashed #dadada;
+}
