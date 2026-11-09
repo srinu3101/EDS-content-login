@@ -8,7 +8,7 @@
  * Every change fires a `cart:change` event on window ({ detail: { count } }).
  */
 
-import { fetchProducts, formatPrice } from './products.js';
+import { fetchProducts, formatPrice, hasWorker } from './products.js';
 
 const KEY = 'wknd-cart';
 export const MAX_QTY = 10;
@@ -95,9 +95,7 @@ let member;
  */
 export function isMember() {
   if (!member) {
-    const host = window.location.hostname;
-    const hasWorker = !(host === 'localhost' || host === '127.0.0.1' || /\.aem\.(page|live)$/.test(host));
-    member = !hasWorker ? Promise.resolve(false)
+    member = !hasWorker() ? Promise.resolve(false)
       : fetch('/auth/me', { credentials: 'same-origin', cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : {}))
         .then((u) => u.signedIn === true)

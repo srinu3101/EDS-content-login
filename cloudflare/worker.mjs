@@ -51,6 +51,11 @@
  * (.plain.html, images) get 401. The user-details block loads its premium
  * content from such a page, so that content is never part of a public page.
  *
+ * COMMERCE: GET /commerce/products.json returns the Shopify catalog (Storefront
+ * API, products tagged `wknd-shop`) in the shape the shop blocks read — the
+ * same as the /data/products sheet. The Storefront token never leaves the
+ * worker; answers are cached for a minute.
+ *
  * Environment variables:
  *   ORIGIN_HOSTNAME    main--eds-content-login--srinu3101.aem.live
  *   PUSH_INVALIDATION  disabled (workers.dev) | enabled (own domain + CDN config)
@@ -60,6 +65,9 @@
  *   AUTH0_CLIENT_ID    Auth0 application Client ID
  *   AUTH0_CLIENT_SECRET  Auth0 application Client Secret (secret)
  *   SESSION_SECRET     long random string used to sign sessions (secret)
+ *   SHOPIFY_STORE_DOMAIN      e.g. wknd-demo-430gsp3x.myshopify.com
+ *   SHOPIFY_STOREFRONT_TOKEN  Storefront API public access token (secret)
+ *   SHOPIFY_API_VERSION       optional, defaults to SHOPIFY_DEFAULT_VERSION
  */
 
 'use strict';
@@ -296,6 +304,104 @@ const isSignedIn = async (request, env) => {
 
 /* -------------------------------------------------------------- END AUTH */
 
+/* -------------------------------------------------------------- COMMERCE */
+
+const SHOPIFY_DEFAULT_VERSION = '2025-10';
+const COMMERCE_CACHE_SECONDS = 60;
+const SHOP_TAG = 'wknd-shop';
+const MEMBER_PRICE_TAG = /^member-price-(\d+(?:\.\d+)?)$/i;
+
+const PRODUCTS_QUERY = `query Products($cursor: String, $query: String) {
+  products(first: 100, after: $cursor, query: $query) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      handle title description productType tags
+      featuredImage { url altText }
+      variants(first: 1) {
+        nodes { id sku availableForSale quantityAvailable price { amount } }
+      }
+    }
+  }
+}`;
+
+const commerceJson = (body, status = 200, maxAge = 0) => new Response(JSON.stringify(body), {
+  status,
+  headers: {
+    'content-type': 'application/json',
+    'cache-control': maxAge ? `public, max-age=${maxAge}` : 'no-store',
+  },
+});
+
+const shopifyQuery = async (env, query, variables) => {
+  const domain = env.SHOPIFY_STORE_DOMAIN.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const version = env.SHOPIFY_API_VERSION || SHOPIFY_DEFAULT_VERSION;
+  const resp = await fetch(`https://${domain}/api/${version}/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-shopify-storefront-access-token': env.SHOPIFY_STOREFRONT_TOKEN,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!resp.ok) throw new Error(`Shopify answered ${resp.status}`);
+  const json = await resp.json();
+  if (json.errors) throw new Error(`Shopify query failed: ${JSON.stringify(json.errors).slice(0, 200)}`);
+  return json.data;
+};
+
+// one Shopify product (first variant) → { sku, name, category, price, … }
+const toShopProduct = (node) => {
+  const variant = (node.variants && node.variants.nodes && node.variants.nodes[0]) || {};
+  const memberTag = (node.tags || []).map((t) => t.trim()).find((t) => MEMBER_PRICE_TAG.test(t));
+  let stock = '';
+  if (typeof variant.quantityAvailable === 'number') stock = String(Math.max(0, variant.quantityAvailable));
+  else if (variant.availableForSale === false) stock = '0';
+  return {
+    sku: variant.sku || node.handle,
+    name: node.title,
+    category: node.productType || '',
+    price: variant.price ? String(Number(variant.price.amount)) : '',
+    memberPrice: memberTag ? memberTag.match(MEMBER_PRICE_TAG)[1] : '',
+    stock,
+    image: node.featuredImage ? node.featuredImage.url : '',
+    description: node.description || '',
+    handle: node.handle,
+    variantId: variant.id || '',
+  };
+};
+
+const handleCommerceProducts = async (request, env, ctx) => {
+  if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method Not Allowed', { status: 405 });
+  if (!env.SHOPIFY_STORE_DOMAIN || !env.SHOPIFY_STOREFRONT_TOKEN) {
+    return commerceJson({ error: 'Commerce is not configured' }, 404);
+  }
+  const cache = typeof caches !== 'undefined' ? caches.default : null;
+  const cacheKey = new Request(new URL('/commerce/products.json', request.url).href);
+  const cached = cache && await cache.match(cacheKey);
+  if (cached) return cached;
+  try {
+    const nodes = [];
+    let cursor = null;
+    for (let page = 0; page < 10; page += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const data = await shopifyQuery(env, PRODUCTS_QUERY, { cursor, query: `tag:${SHOP_TAG}` });
+      nodes.push(...data.products.nodes);
+      if (!data.products.pageInfo.hasNextPage) break;
+      cursor = data.products.pageInfo.endCursor;
+    }
+    const products = nodes.map(toShopProduct).filter((p) => p.sku && p.name && p.price);
+    const resp = commerceJson({
+      total: products.length, offset: 0, limit: products.length, data: products, source: 'shopify',
+    }, 200, COMMERCE_CACHE_SECONDS);
+    if (cache && ctx && ctx.waitUntil) ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+    return resp;
+  } catch (e) {
+    return commerceJson({ error: 'Products could not be loaded from Shopify' }, 502);
+  }
+};
+
+/* ---------------------------------------------------------- END COMMERCE */
+
 /* ---------------------------------------------------------- LOCKED PAGES */
 
 // Whole documents only signed-in visitors may open: /premium/… (premium
@@ -502,6 +608,11 @@ const handleRequest = async (request, env, ctx) => {
   // AUTH: sign-in routes are answered here, never forwarded to the origin
   if (url.pathname.startsWith('/auth/')) {
     return handleAuth(request, url, env);
+  }
+
+  // COMMERCE: the Shopify catalog for the shop blocks
+  if (url.pathname === '/commerce/products.json') {
+    return handleCommerceProducts(request, env, ctx);
   }
 
   // LOCKED PAGES: /premium/* and /members/* only for signed-in visitors

@@ -1,11 +1,11 @@
 /*
  * product-details — the product detail page (PDP). One page serves every
  * product: it reads ?sku= from the address, finds that product in the demo
- * product API (/data/products.json) and shows photo, name, category, price,
+ * product API (Shopify via the worker, else /data/products) and shows photo, name, category, price,
  * member price, stock and description.
  *
  * Authored block, every row optional:
- *   "Source"    | /data/products.json   → product API address
+ *   "Source"    | /data/products.json   → force another product API address
  *   "Shop Page" | /us/en/shop           → target of the "Back to Shop" link
  * The block renders the page's h1 (the product name).
  */
