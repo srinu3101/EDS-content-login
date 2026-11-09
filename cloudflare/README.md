@@ -51,6 +51,9 @@ This folder is in `.hlxignore`, so it is kept in git but not published.
 | **Secret** | `SESSION_SECRET` | 64+ random characters (e.g. a password manager's generator) |
 | Text | `LOGIN_TEASER` | optional, e.g. `/fragments/login-teaser` |
 | **Secret** | `ORIGIN_AUTHENTICATION` | optional: site token once aem.live is protected |
+| Text | `SHOPIFY_STORE_DOMAIN` | optional: Shopify store, e.g. `wknd-demo-430gsp3x.myshopify.com` |
+| **Secret** | `SHOPIFY_STOREFRONT_TOKEN` | optional: Storefront API public access token (Shopify **Headless** channel) |
+| Text | `SHOPIFY_API_VERSION` | optional: Storefront API version, defaults to the one in `worker.mjs` |
 
    Deploy. Enter secrets only in Cloudflare — never in code, chat or email.
    Changing `SESSION_SECRET` signs everyone out.
@@ -81,3 +84,23 @@ This folder is in `.hlxignore`, so it is kept in git but not published.
   to this worker's login (`EDGE_ORIGIN` in `scripts/gated.js`); nothing there
   unlocks premium content. Protect those hosts with site authentication and
   set `ORIGIN_AUTHENTICATION`, otherwise their page source bypasses this worker.
+
+## Shopify products (`/commerce/products.json`)
+
+With `SHOPIFY_STORE_DOMAIN` and `SHOPIFY_STOREFRONT_TOKEN` set, the worker
+answers `/commerce/products.json` from the Shopify **Storefront API** — the
+products tagged `wknd-shop` — in the same shape as the `/data/products` sheet,
+cached for a minute. The shop blocks (`scripts/products.js`) read it first and
+fall back to the sheet when it is missing, empty or failing (and always on
+aem.page / aem.live / localhost, which have no worker).
+
+Mapping: first variant's SKU → `sku`, title → `name`, product type →
+`category`, variant price → `price`, tag `member-price-<n>` → `memberPrice`,
+quantity available → `stock`, featured image → `image`, description →
+`description` (plus `handle`, `variantId`).
+
+Shopify setup: install the **Headless** sales channel, create a storefront,
+allow *read products, inventory and tags* (and *carts / checkouts* for a
+Shopify checkout), include the products in the Headless channel, tag them
+`wknd-shop`. Import file for the demo products: `.migration/shopify/wknd-products.csv`
+(not committed).

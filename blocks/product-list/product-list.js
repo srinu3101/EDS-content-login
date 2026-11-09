@@ -1,11 +1,12 @@
 /*
- * product-list — the shop's product listing page (PLP). Reads the demo
- * product API (/data/products.json, a Document Authoring sheet) and shows a
- * card grid with category filter tabs; each card links to the product page.
+ * product-list — the shop's product listing page (PLP). Reads the product
+ * API (Shopify via the worker, else the /data/products sheet — see
+ * scripts/products.js) and shows a card grid with category filter tabs;
+ * each card links to the product page.
  *
  * Authored block, every row optional:
  *   "Category"     | Surf                  → show only this category (no tabs)
- *   "Source"       | /data/products.json   → product API address
+ *   "Source"       | /data/products.json   → force another product API address
  *   "Product Page" | /us/en/shop/product   → detail page, opened with ?sku=
  * The tab can also be preselected with ?category=surf in the page address.
  */

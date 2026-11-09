@@ -1,13 +1,16 @@
 /*
- * products — the demo product API shared by the product-list (PLP) and
- * product-details (PDP) blocks.
+ * products — the product API shared by the shop blocks (product-list,
+ * product-details, cart, checkout).
  *
- * The catalog is a Document Authoring sheet (/data/products) that Edge
- * Delivery serves as JSON: { data: [{ sku, name, category, price,
- * memberPrice, stock, image, description }, …] }.
+ * Products come from Shopify through the Cloudflare worker
+ * (/commerce/products.json). Where that isn't available — Adobe hosts, local
+ * dev, or Shopify down — the Document Authoring sheet /data/products is used.
+ * Both answer { data: [{ sku, name, category, price, memberPrice, stock,
+ * image, description, … }] }.
  */
 
-export const PRODUCTS_PATH = '/data/products.json';
+export const PRODUCTS_PATH = '/commerce/products.json';
+export const SHEET_PATH = '/data/products.json';
 export const PRODUCT_PAGE = '/us/en/shop/product';
 export const SHOP_PAGE = '/us/en/shop';
 
@@ -24,12 +27,7 @@ const toNumber = (value) => {
  */
 export const formatPrice = (value) => money.format(value);
 
-/**
- * Loads and normalises the catalog; rows without a sku or name are skipped.
- * @param {string} [path] JSON address of the products sheet
- * @returns {Promise<Array>} products, or [] when the API can't be read
- */
-export async function fetchProducts(path = PRODUCTS_PATH) {
+async function loadProducts(path) {
   try {
     const url = new URL(path, window.location);
     url.searchParams.set('limit', '1000');
@@ -52,6 +50,34 @@ export async function fetchProducts(path = PRODUCTS_PATH) {
   } catch (e) {
     return [];
   }
+}
+
+/**
+ * Whether this host is served by the Cloudflare worker (Adobe hosts and local
+ * dev have no /auth/* or /commerce/* routes).
+ */
+export function hasWorker() {
+  const host = window.location.hostname;
+  return !(host === 'localhost' || host === '127.0.0.1' || /\.aem\.(page|live)$/.test(host));
+}
+
+const loaded = new Map();
+
+/**
+ * Loads and normalises the catalog (once per page and address); rows without
+ * a sku or name are skipped. An empty answer from anywhere but the sheet falls
+ * back to the sheet, so the shop keeps working without Shopify.
+ * @param {string} [path] JSON address of the product API
+ * @returns {Promise<Array>} products, or [] when nothing can be read
+ */
+export function fetchProducts(path = PRODUCTS_PATH) {
+  if (path === PRODUCTS_PATH && !hasWorker()) return fetchProducts(SHEET_PATH);
+  if (!loaded.has(path)) {
+    const fallback = (products) => (products.length || path === SHEET_PATH
+      ? products : fetchProducts(SHEET_PATH));
+    loaded.set(path, loadProducts(path).then(fallback));
+  }
+  return loaded.get(path);
 }
 
 /**
