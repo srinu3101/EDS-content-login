@@ -7,3 +7,4 @@ package-lock.json
 test/*
 sync-block-collection.sh
 cloudflare/*
+catalog/
