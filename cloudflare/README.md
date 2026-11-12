@@ -37,8 +37,15 @@ This folder is in `.hlxignore`, so it is kept in git but not published.
 
 ## 2. Cloudflare worker
 
-1. Workers & Pages → `eds-content-login` → **Edit code** → select all, delete,
-   paste the whole of `worker.mjs` → **Deploy**.
+1. Deploy the code — automatically (recommended) or by hand:
+   - **Automatic (Workers Builds):** Workers & Pages → `eds-content-login` →
+     Settings → **Builds → Connect** → GitHub → `srinu3101/EDS-content-login`,
+     branch `main`, root directory `cloudflare`, deploy command
+     `npx wrangler deploy`. Every merge into `main` then deploys `worker.mjs`
+     using `wrangler.toml` (`keep_vars = true` keeps the dashboard variables).
+   - **By hand:** `cd cloudflare && npx wrangler deploy` (after `npx wrangler
+     login`), or Workers & Pages → `eds-content-login` → **Edit code** → paste
+     the whole of `worker.mjs` → **Deploy**.
 2. Settings → Variables and Secrets:
 
 | Type | Name | Value |

@@ -1,0 +1,16 @@
+# Cloudflare Workers config for automatic deploys (Workers Builds / wrangler).
+# Cloudflare dashboard → Workers & Pages → eds-content-login → Settings → Builds:
+#   repository srinu3101/EDS-content-login · branch main · root directory cloudflare
+#   deploy command: npx wrangler deploy
+# Secrets and text variables are managed in the dashboard (Settings → Variables
+# and Secrets) — never put them in this file.
+
+name = "eds-content-login"
+main = "worker.mjs"
+# same as the worker's current setting in the dashboard (Settings → Runtime)
+compatibility_date = "2026-10-23"
+workers_dev = true
+
+# keep the variables set in the dashboard (ORIGIN_HOSTNAME, AUTH0_*, SHOPIFY_* …);
+# without this a deploy would remove every variable not listed here
+keep_vars = true
