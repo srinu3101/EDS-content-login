@@ -11,9 +11,10 @@
 # multiple small sitemaps into one larger sitemap").
 #
 #   - content : /query-index.json  → 16 adventure-detail + 5 magazine-article
-#   - pages   : /pages-index.json  → homepage + adventures/magazine/about-us/faqs
+#   - pages   : /pages-index.json  → homepage + adventures/magazine/about-us/faqs/news
+#   - news    : /news-index.json   → news articles (/us/en/news/**)
 #
-# = 26 URLs total. Update `origin` to the real production domain once one exists.
+# Update `origin` to the real production domain once one exists.
 
 sitemaps:
   default:
@@ -28,5 +29,9 @@ sitemaps:
         hreflang: en
       pages:
         source: /pages-index.json
+        destination: /sitemap.xml
+        hreflang: en
+      news:
+        source: /news-index.json
         destination: /sitemap.xml
         hreflang: en

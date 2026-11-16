@@ -51,6 +51,12 @@
  * (.plain.html, images) get 401. The user-details block loads its premium
  * content from such a page, so that content is never part of a public page.
  *
+ * NEWS (edge assembly): on /us/en/news and /us/en/news/* pages the worker
+ * fills the news-list, related-articles and latest-articles placeholder blocks
+ * from /news-index.json (cached ~60 s) before the page is sent — the News list
+ * (newest first, ?page=n), 3 related (same category / tag) and 5 latest (never
+ * the article itself). No index → page unchanged (blocks fill themselves).
+ *
  * COMMERCE: GET /commerce/products.json returns the Shopify catalog (Storefront
  * API, products tagged `wknd-shop`) in the shape the shop blocks read — the
  * same as the /data/products sheet. The Storefront token never leaves the
@@ -585,6 +591,206 @@ const applyGating = async (request, resp, env, extension) => {
 
 /* ------------------------------------------------------------ END GATING */
 
+/* ------------------------------------------------------------------ NEWS */
+
+const NEWS_ROOT = '/us/en/news';
+const NEWS_INDEX = '/news-index.json';
+const NEWS_INDEX_SECONDS = 60; // a new article shows up within about a minute
+const NEWS_PAGE_SECONDS = 60; // browsers keep an assembled news page this long
+const NEWS_BLOCKS = /<div class="(news-list|related-articles|latest-articles)(?:\s[^"]*)?">/g;
+const NEWS_DEFAULTS = {
+  'news-list': { 'per page': 10 },
+  'related-articles': { title: 'Related articles', count: 3 },
+  'latest-articles': { title: 'Latest articles', count: 5 },
+};
+
+const isNewsPath = (path) => path === NEWS_ROOT || path.startsWith(`${NEWS_ROOT}/`);
+
+const escapeHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+const cleanPath = (path) => String(path || '').replace(/\.html$/, '').replace(/\/$/, '') || '/';
+
+const newsDateFormat = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC',
+});
+
+const formatNewsDate = (date) => {
+  const d = new Date(`${String(date || '').slice(0, 10)}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? '' : newsDateFormat.format(d);
+};
+
+// index image URLs point at the locked origin → serve them from this host
+const newsImagePath = (src) => {
+  try {
+    const url = new URL(src);
+    return /\.aem\.(page|live)$/.test(url.hostname) ? url.pathname : url.href;
+  } catch (e) {
+    return src && src.startsWith('/') ? src.split('?')[0] : '';
+  }
+};
+
+// all news articles, newest first; [] when the index can't be read
+const loadNews = async (env) => {
+  const headers = {};
+  if (env.ORIGIN_AUTHENTICATION) headers.authorization = `token ${env.ORIGIN_AUTHENTICATION}`;
+  try {
+    const resp = await fetch(`https://${env.ORIGIN_HOSTNAME}${NEWS_INDEX}?limit=1000`, {
+      headers, cf: { cacheEverything: true, cacheTtl: NEWS_INDEX_SECONDS },
+    });
+    if (!resp.ok) return [];
+    const json = await resp.json();
+    return (Array.isArray(json.data) ? json.data : [])
+      .filter((row) => row.path && row.title)
+      .map((row) => ({
+        path: cleanPath(row.path),
+        title: String(row.title).trim(),
+        description: String(row.description || '').trim(),
+        image: newsImagePath(row.image),
+        date: String(row.date || '').slice(0, 10),
+        category: String(row.category || '').trim(),
+        tags: String(row.tags || '').split(',').map((t) => t.trim().toLowerCase()).filter(Boolean),
+        lastModified: Number(row.lastModified) || 0,
+      }))
+      .sort((a, b) => b.date.localeCompare(a.date) || b.lastModified - a.lastModified);
+  } catch (e) {
+    return [];
+  }
+};
+
+// same rules as scripts/articles.js
+const pickLatestNews = (articles, current, count) => articles
+  .filter((a) => a.path !== current).slice(0, count);
+
+const pickRelatedNews = (articles, current, count) => {
+  const self = articles.find((a) => a.path === current);
+  const others = articles.filter((a) => a.path !== current);
+  if (!self) return others.slice(0, count);
+  const category = self.category.toLowerCase();
+  const matches = others.filter((a) => (category && a.category.toLowerCase() === category)
+    || a.tags.some((t) => self.tags.includes(t)));
+  return [...matches, ...others.filter((a) => !matches.includes(a))].slice(0, count);
+};
+
+// same markup as buildCard() in scripts/articles.js
+const newsPicture = (src) => {
+  const ext = (src.split('.').pop() || 'jpg').toLowerCase();
+  return `<picture><source type="image/webp" srcset="${escapeHtml(src)}?width=750&amp;format=webply&amp;optimize=medium">`
+    + `<img loading="lazy" alt="" src="${escapeHtml(src)}?width=750&amp;format=${escapeHtml(ext)}&amp;optimize=medium"></picture>`;
+};
+
+const newsCard = (article, heading) => {
+  const href = escapeHtml(article.path);
+  const label = formatNewsDate(article.date);
+  const meta = [
+    article.category ? `<span>${escapeHtml(article.category)}</span>` : '',
+    label ? `<time datetime="${escapeHtml(article.date)}">${escapeHtml(label)}</time>` : '',
+  ].filter(Boolean).join(' · ');
+  return '<li class="article-card">'
+    + (article.image ? `<a class="article-card-image" href="${href}" tabindex="-1" aria-hidden="true">${newsPicture(article.image)}</a>` : '')
+    + '<div class="article-card-body">'
+    + `<p class="article-card-meta">${meta}</p>`
+    + `<${heading}><a href="${href}">${escapeHtml(article.title)}</a></${heading}>`
+    + (article.description ? `<p class="article-card-description">${escapeHtml(article.description)}</p>` : '')
+    + '</div></li>';
+};
+
+const newsCards = (articles, heading) => `<ul class="article-cards" data-edge="assembled">${articles.map((a) => newsCard(a, heading)).join('')}</ul>`;
+
+const newsPagination = (current, pages) => {
+  if (pages < 2) return '';
+  const link = (n, text, active) => `<a href="${NEWS_ROOT}${n > 1 ? `?page=${n}` : ''}"${active ? ' aria-current="page"' : ''}>${text}</a>`;
+  let html = '<nav class="news-pagination" aria-label="News pages">';
+  if (current > 1) html += link(current - 1, '← Newer', false);
+  for (let n = 1; n <= pages; n += 1) html += link(n, String(n), n === current);
+  if (current < pages) html += link(current + 1, 'Older →', false);
+  return `${html}</nav>`;
+};
+
+// "Label | value" rows authored in a placeholder block
+const newsBlockConfig = (block, name) => {
+  const config = { ...NEWS_DEFAULTS[name] };
+  const innerStart = block.indexOf('>') + 1;
+  const innerEnd = block.lastIndexOf('</div>');
+  childDivs(block, innerStart, innerEnd).forEach(([start, end]) => {
+    const cells = childDivs(block, block.indexOf('>', start) + 1, end);
+    if (cells.length < 2) return;
+    const key = textOf(block.slice(...cells[0]));
+    const value = block.slice(...cells[1]).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (key && value) config[key] = value;
+  });
+  return config;
+};
+
+const newsBlockHtml = (name, config, articles, current, page) => {
+  if (name === 'news-list') {
+    const perPage = Number(config['per page']) || 10;
+    const category = String(config.category || '').toLowerCase();
+    const list = articles.filter((a) => !category || a.category.toLowerCase() === category);
+    if (!list.length) return null;
+    const pages = Math.ceil(list.length / perPage);
+    const at = Math.min(Math.max(1, page), pages);
+    return newsCards(list.slice((at - 1) * perPage, at * perPage), 'h2') + newsPagination(at, pages);
+  }
+  const count = Number(config.count) || NEWS_DEFAULTS[name].count;
+  const picked = name === 'related-articles'
+    ? pickRelatedNews(articles, current, count)
+    : pickLatestNews(articles, current, count);
+  if (!picked.length) return null;
+  return `<h2 class="article-list-heading">${escapeHtml(config.title)}</h2>${newsCards(picked, 'h3')}`;
+};
+
+// EDGE ASSEMBLY: fill the news placeholder blocks before the page is sent.
+// Pages without placeholders, or an unreadable index, pass through unchanged
+// (the blocks then fill themselves in the browser).
+const assembleNews = async (request, resp, env, extension) => {
+  const url = new URL(request.url);
+  if (!isNewsPath(url.pathname) || !isPageRequest(extension) || url.pathname.endsWith('.plain.html')) return resp;
+  if (resp.status !== 200 || !(resp.headers.get('content-type') || '').includes('text/html')) return resp;
+  const html = await resp.text();
+  NEWS_BLOCKS.lastIndex = 0;
+  if (!NEWS_BLOCKS.test(html)) return new Response(html, resp);
+
+  const articles = await loadNews(env);
+  if (!articles.length) return new Response(html, resp);
+  const current = cleanPath(url.pathname);
+  const page = Number(url.searchParams.get('page')) || 1;
+
+  let out = '';
+  let pos = 0;
+  let filled = 0;
+  NEWS_BLOCKS.lastIndex = 0;
+  let match = NEWS_BLOCKS.exec(html);
+  while (match) {
+    const start = match.index;
+    const end = findDivEnd(html, start);
+    const name = match[1];
+    const inner = newsBlockHtml(name, newsBlockConfig(html.slice(start, end), name), articles, current, page);
+    if (inner) {
+      out += `${html.slice(pos, start)}${match[0]}<div><div>${inner}</div></div></div>`;
+      pos = end;
+      filled += 1;
+    }
+    NEWS_BLOCKS.lastIndex = end;
+    match = NEWS_BLOCKS.exec(html);
+  }
+  const assembled = new Response(out + html.slice(pos), resp);
+  assembled.headers.delete('content-length');
+  assembled.headers.delete('etag');
+  assembled.headers.delete('last-modified');
+  if (filled) {
+    // a page already made private (gated content) stays private
+    if (!/private|no-store/.test(assembled.headers.get('cache-control') || '')) {
+      assembled.headers.set('cache-control', `public, max-age=${NEWS_PAGE_SECONDS}`);
+    }
+    assembled.headers.set('x-news-assembled', String(filled));
+  }
+  return assembled;
+};
+
+/* -------------------------------------------------------------- END NEWS */
+
 const handleRequest = async (request, env, ctx) => {
   const url = new URL(request.url);
   if (url.port) {
@@ -683,6 +889,8 @@ const handleRequest = async (request, env, ctx) => {
     cf: {
       // cf doesn't cache html by default: need to override the default behavior
       cacheEverything: true,
+      // NEWS: the article index stays fresh (new articles within about a minute)
+      ...(url.pathname === NEWS_INDEX ? { cacheTtl: NEWS_INDEX_SECONDS } : {}),
     },
   });
   resp = new Response(resp.body, resp);
@@ -701,6 +909,8 @@ const handleRequest = async (request, env, ctx) => {
   resp = await rewriteOriginUrls(request, resp, env, extension);
   // GATING: tailor the page to this visitor before it leaves Cloudflare
   resp = await applyGating(request, resp, env, extension);
+  // NEWS: assemble News list / Related / Latest into news pages at the edge
+  resp = await assembleNews(request, resp, env, extension);
   return locked ? makePrivate(resp) : resp;
 };
 
