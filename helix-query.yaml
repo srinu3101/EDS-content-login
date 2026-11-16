@@ -42,6 +42,41 @@ indices:
         select: none
         value: parseTimestamp(headers['last-modified'], 'ddd, DD MMM YYYY hh:mm:ss GMT')
 
+  # News articles index → /news-index.json.
+  #
+  # Feeds the News list and the Related / Latest articles that the Cloudflare
+  # worker assembles into the news pages (and the blocks' browser fallback).
+  # Articles carry page metadata Date (YYYY-MM-DD) and Category (+ optional
+  # Tags). The listing page /us/en/news itself is not an article.
+  news:
+    include:
+      - '/us/en/news/**'
+    exclude:
+      - '/us/en/news'
+    target: /news-index.json
+    properties:
+      title:
+        select: head > meta[property="og:title"]
+        value: attribute(el, 'content')
+      description:
+        select: head > meta[name="description"]
+        value: attribute(el, 'content')
+      image:
+        select: head > meta[property="og:image"]
+        value: attribute(el, 'content')
+      date:
+        select: head > meta[name="date"]
+        value: attribute(el, 'content')
+      category:
+        select: head > meta[name="category"]
+        value: attribute(el, 'content')
+      tags:
+        select: head > meta[name="tags"]
+        value: attribute(el, 'content')
+      lastModified:
+        select: none
+        value: parseTimestamp(headers['last-modified'], 'ddd, DD MMM YYYY hh:mm:ss GMT')
+
   # Static/listing pages index → /pages-index.json.
   #
   # The `content` index above is deliberately scoped to detail pages only (it
@@ -55,6 +90,7 @@ indices:
       - '/us/en/magazine'
       - '/us/en/about-us'
       - '/us/en/faqs'
+      - '/us/en/news'
     target: /pages-index.json
     properties:
       title:
