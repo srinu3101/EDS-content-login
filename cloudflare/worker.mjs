@@ -60,7 +60,9 @@
  * COMMERCE: GET /commerce/products.json returns the Shopify catalog (Storefront
  * API, products tagged `wknd-shop`) in the shape the shop blocks read — the
  * same as the /data/products sheet. The Storefront token never leaves the
- * worker; answers are cached for a minute.
+ * worker. Answers are kept in the COMMERCE_CACHE KV namespace for a day
+ * (x-commerce-cache: HIT / MISS, ETag = content version); without KV they are
+ * cached for a minute (x-commerce-cache: BYPASS).
  *
  * Environment variables:
  *   ORIGIN_HOSTNAME    main--eds-content-login--srinu3101.aem.live
@@ -74,6 +76,10 @@
  *   SHOPIFY_STORE_DOMAIN      e.g. wknd-demo-430gsp3x.myshopify.com
  *   SHOPIFY_STOREFRONT_TOKEN  Storefront API public access token (secret)
  *   SHOPIFY_API_VERSION       optional, defaults to SHOPIFY_DEFAULT_VERSION
+ *   CACHE_ADMIN_TOKEN         protects the commerce cache admin API (secret)
+ *
+ * Bindings (wrangler.toml):
+ *   COMMERCE_CACHE            KV namespace for the commerce JSON cache
  */
 
 'use strict';
@@ -376,33 +382,255 @@ const toShopProduct = (node) => {
   };
 };
 
+// the products.json body, straight from Shopify (no cache)
+const loadShopifyProducts = async (env) => {
+  const nodes = [];
+  let cursor = null;
+  for (let page = 0; page < 10; page += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const data = await shopifyQuery(env, PRODUCTS_QUERY, { cursor, query: `tag:${SHOP_TAG}` });
+    nodes.push(...data.products.nodes);
+    if (!data.products.pageInfo.hasNextPage) break;
+    cursor = data.products.pageInfo.endCursor;
+  }
+  const products = nodes.map(toShopProduct).filter((p) => p.sku && p.name && p.price);
+  return JSON.stringify({
+    total: products.length, offset: 0, limit: products.length, data: products, source: 'shopify',
+  });
+};
+
+/*
+ * COMMERCE CACHE: with the COMMERCE_CACHE KV binding (wrangler.toml) the JSON
+ * is kept in Cloudflare KV — one copy for every data center — for a day, with
+ * metadata { version, savedAt }. version is a hash of the body, so the same
+ * data always has the same version (ETag). Without the binding the worker
+ * falls back to the per-data-center Cache API for a minute.
+ */
+const COMMERCE_KV_SECONDS = 86400;
+const PRODUCTS_KEY = 'products.json';
+
+const contentVersion = async (text) => {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+// saves products (loaded from Shopify unless given) in KV → { body, version, savedAt }
+const saveProducts = async (env, loaded) => {
+  const body = loaded || await loadShopifyProducts(env);
+  const entry = { body, version: await contentVersion(body), savedAt: new Date().toISOString() };
+  await env.COMMERCE_CACHE.put(PRODUCTS_KEY, body, {
+    expirationTtl: COMMERCE_KV_SECONDS,
+    metadata: { version: entry.version, savedAt: entry.savedAt },
+  });
+  return entry;
+};
+
+// browsers always re-check (cheap 304 from KV), so a cleared cache shows at once
+const cachedJson = (request, entry, state) => {
+  const etag = `"${entry.version}"`;
+  const headers = {
+    'content-type': 'application/json',
+    'cache-control': 'public, max-age=0, must-revalidate',
+    etag,
+    'x-commerce-cache': state,
+    'x-commerce-version': entry.version,
+    'x-commerce-saved-at': entry.savedAt,
+  };
+  if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
+  return new Response(request.method === 'HEAD' ? null : entry.body, { headers });
+};
+
 const handleCommerceProducts = async (request, env, ctx) => {
   if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method Not Allowed', { status: 405 });
   if (!env.SHOPIFY_STORE_DOMAIN || !env.SHOPIFY_STOREFRONT_TOKEN) {
     return commerceJson({ error: 'Commerce is not configured' }, 404);
   }
+
+  if (env.COMMERCE_CACHE) {
+    let stored = null;
+    try {
+      stored = await env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY);
+    } catch (e) {
+      stored = null; // KV unavailable → answer from Shopify below
+    }
+    if (stored && stored.value && stored.metadata && stored.metadata.version) {
+      return cachedJson(request, { body: stored.value, ...stored.metadata }, 'HIT');
+    }
+    try {
+      return cachedJson(request, await saveProducts(env), 'MISS');
+    } catch (e) {
+      // KV write failed or Shopify failed: try Shopify once more without KV
+    }
+  }
+
   const cache = typeof caches !== 'undefined' ? caches.default : null;
   const cacheKey = new Request(new URL('/commerce/products.json', request.url).href);
   const cached = cache && await cache.match(cacheKey);
   if (cached) return cached;
   try {
-    const nodes = [];
-    let cursor = null;
-    for (let page = 0; page < 10; page += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      const data = await shopifyQuery(env, PRODUCTS_QUERY, { cursor, query: `tag:${SHOP_TAG}` });
-      nodes.push(...data.products.nodes);
-      if (!data.products.pageInfo.hasNextPage) break;
-      cursor = data.products.pageInfo.endCursor;
-    }
-    const products = nodes.map(toShopProduct).filter((p) => p.sku && p.name && p.price);
-    const resp = commerceJson({
-      total: products.length, offset: 0, limit: products.length, data: products, source: 'shopify',
-    }, 200, COMMERCE_CACHE_SECONDS);
+    const resp = new Response(await loadShopifyProducts(env), {
+      headers: {
+        'content-type': 'application/json',
+        'cache-control': `public, max-age=${COMMERCE_CACHE_SECONDS}`,
+        'x-commerce-cache': 'BYPASS',
+      },
+    });
     if (cache && ctx && ctx.waitUntil) ctx.waitUntil(cache.put(cacheKey, resp.clone()));
     return resp;
   } catch (e) {
     return commerceJson({ error: 'Products could not be loaded from Shopify' }, 502);
+  }
+};
+
+/*
+ * CHANGE WATCHER (Cron Trigger, wrangler.toml): every minute the worker loads
+ * the catalog from Shopify and compares its version with the one in KV.
+ * Changed → the KV copy is replaced at once (invalidate + refill, so visitors
+ * never wait for Shopify) and the change is recorded for cache-status.json.
+ * Unchanged → nothing is written (KV free plan: 1,000 writes a day), except a
+ * refill shortly before the day-long copy would expire.
+ */
+const STATUS_KEY = 'cache-status';
+const REFILL_BEFORE_SECONDS = 3600;
+const PRODUCT_FIELDS = ['name', 'category', 'price', 'memberPrice', 'stock', 'image', 'description'];
+
+const parseProducts = (body) => {
+  try {
+    return (JSON.parse(body).data || []);
+  } catch (e) {
+    return [];
+  }
+};
+
+// what changed between two products.json bodies, e.g. "TENT-001 price 379 → 349"
+const describeChanges = (oldBody, newBody) => {
+  const before = new Map(parseProducts(oldBody).map((p) => [p.sku, p]));
+  const after = new Map(parseProducts(newBody).map((p) => [p.sku, p]));
+  const changes = [];
+  after.forEach((p, sku) => {
+    const old = before.get(sku);
+    if (!old) {
+      changes.push({ sku, change: 'added' });
+      return;
+    }
+    PRODUCT_FIELDS.filter((f) => String(old[f] ?? '') !== String(p[f] ?? '')).forEach((field) => {
+      const short = !['image', 'description'].includes(field);
+      changes.push({
+        sku, change: field, ...(short ? { from: old[field] ?? '', to: p[field] ?? '' } : {}),
+      });
+    });
+  });
+  before.forEach((p, sku) => { if (!after.has(sku)) changes.push({ sku, change: 'removed' }); });
+  return changes.slice(0, 50);
+};
+
+const checkProducts = async (env, trigger = 'watcher') => {
+  if (!env.COMMERCE_CACHE || !env.SHOPIFY_STORE_DOMAIN || !env.SHOPIFY_STOREFRONT_TOKEN) {
+    return { checked: false };
+  }
+  const body = await loadShopifyProducts(env);
+  const version = await contentVersion(body);
+  const stored = await env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY);
+  const meta = (stored && stored.metadata) || {};
+  if (stored && stored.value && meta.version === version) {
+    const age = (Date.now() - Date.parse(meta.savedAt)) / 1000;
+    const refill = !(age < COMMERCE_KV_SECONDS - REFILL_BEFORE_SECONDS);
+    if (refill) await saveProducts(env, body); // same data, refilled before it expires
+    return {
+      checked: true, changed: false, refilled: refill, version,
+    };
+  }
+  const entry = await saveProducts(env, body);
+  if (stored && stored.value) {
+    await env.COMMERCE_CACHE.put(STATUS_KEY, JSON.stringify({
+      changedAt: entry.savedAt,
+      trigger,
+      from: meta.version || '',
+      to: entry.version,
+      changes: describeChanges(stored.value, body),
+    }));
+  }
+  return { checked: true, changed: true, version: entry.version };
+};
+
+// GET /commerce/cache-status.json — what is cached now and the last change (demo)
+const handleCacheStatus = async (env) => {
+  if (!env.COMMERCE_CACHE) return commerceJson({ cache: 'none' });
+  const [stored, lastChange] = await Promise.all([
+    env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY),
+    env.COMMERCE_CACHE.get(STATUS_KEY, { type: 'json' }),
+  ]);
+  const meta = (stored && stored.value && stored.metadata) || null;
+  return commerceJson({
+    cache: 'kv',
+    watcher: 'checks Shopify every minute',
+    keptFor: `${COMMERCE_KV_SECONDS / 3600} hours`,
+    products: meta ? {
+      version: meta.version,
+      savedAt: meta.savedAt,
+      ageSeconds: Math.round((Date.now() - Date.parse(meta.savedAt)) / 1000),
+      count: parseProducts(stored.value).length,
+    } : null,
+    lastChange: lastChange || null,
+  });
+};
+
+/*
+ * CACHE ADMIN API: POST /commerce/invalidate with
+ *   Authorization: Bearer <CACHE_ADMIN_TOKEN>
+ * body (optional JSON) { "mode": "refresh" | "clear" }
+ *   refresh (default) — check Shopify now, replace the cached copy if changed
+ *   clear             — delete the cached copy; the next visitor reloads it
+ * For manual clearing, Shopify webhooks or an Adobe I/O action. Without the
+ * secret the API is off (404).
+ */
+const sha256Hex = async (text) => {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+const isCacheAdmin = async (request, env) => {
+  const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i);
+  if (!match) return false;
+  // compare fixed-length hashes, so neither the value nor its length leaks
+  return safeEqual(await sha256Hex(match[1].trim()), await sha256Hex(env.CACHE_ADMIN_TOKEN));
+};
+
+const handleInvalidate = async (request, env) => {
+  if (!env.CACHE_ADMIN_TOKEN || !env.COMMERCE_CACHE) return commerceJson({ error: 'Not Found' }, 404);
+  if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { allow: 'POST' } });
+  if (!(await isCacheAdmin(request, env))) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json', 'www-authenticate': 'Bearer', 'cache-control': 'no-store' },
+    });
+  }
+  let mode = 'refresh';
+  try {
+    const body = await request.json();
+    if (body && body.mode) mode = String(body.mode);
+  } catch (e) {
+    // no / invalid body → refresh
+  }
+  if (!['refresh', 'clear'].includes(mode)) return commerceJson({ error: 'mode must be refresh or clear' }, 400);
+
+  if (mode === 'clear') {
+    const stored = await env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY);
+    const from = (stored && stored.metadata && stored.metadata.version) || '';
+    await env.COMMERCE_CACHE.delete(PRODUCTS_KEY);
+    const changedAt = new Date().toISOString();
+    await env.COMMERCE_CACHE.put(STATUS_KEY, JSON.stringify({
+      changedAt, trigger: 'manual clear', from, to: '', changes: [],
+    }));
+    return commerceJson({
+      mode, cleared: true, from, at: changedAt,
+    });
+  }
+  try {
+    const result = await checkProducts(env, 'manual refresh');
+    return commerceJson({ mode, ...result });
+  } catch (e) {
+    return commerceJson({ mode, error: 'Shopify could not be reached; cached copy kept' }, 502);
   }
 };
 
@@ -820,6 +1048,12 @@ const handleRequest = async (request, env, ctx) => {
   if (url.pathname === '/commerce/products.json') {
     return handleCommerceProducts(request, env, ctx);
   }
+  if (url.pathname === '/commerce/cache-status.json') {
+    return handleCacheStatus(env);
+  }
+  if (url.pathname === '/commerce/invalidate') {
+    return handleInvalidate(request, env);
+  }
 
   // LOCKED PAGES: /premium/* and /members/* only for signed-in visitors
   const locked = isLockedPath(url.pathname);
@@ -916,4 +1150,12 @@ const handleRequest = async (request, env, ctx) => {
 
 export default {
   fetch: handleRequest,
+  // CHANGE WATCHER: Cron Trigger (wrangler.toml [triggers])
+  scheduled: (event, env, ctx) => {
+    ctx.waitUntil(checkProducts(env, 'watcher').catch((e) => {
+      // Shopify or KV unavailable: keep the cached copy, try again next minute
+      // eslint-disable-next-line no-console
+      console.log(`commerce watcher: ${e.message}`);
+    }));
+  },
 };
