@@ -14,3 +14,15 @@ workers_dev = true
 # keep the variables set in the dashboard (ORIGIN_HOSTNAME, AUTH0_*, SHOPIFY_* …);
 # without this a deploy would remove every variable not listed here
 keep_vars = true
+
+# commerce JSON cache (Storage & databases → Workers KV → COMMERCE_CACHE).
+# The id is not a secret. Bindings must be listed here: a deploy replaces the
+# bindings set in the dashboard.
+[[kv_namespaces]]
+binding = "COMMERCE_CACHE"
+id = "f633f779e83444a1b5ee0154096c1e3b"
+
+# commerce change watcher: compares Shopify with the cached JSON every minute
+# and refreshes the cache when anything changed (worker.mjs → scheduled)
+[triggers]
+crons = ["* * * * *"]

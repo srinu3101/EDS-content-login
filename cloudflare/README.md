@@ -111,3 +111,35 @@ allow *read products, inventory and tags* (and *carts / checkouts* for a
 Shopify checkout), include the products in the Headless channel, tag them
 `wknd-shop`. Import file for the demo products: `.migration/shopify/wknd-products.csv`
 (not committed).
+
+## Commerce cache and change watcher
+
+`/commerce/products.json` is kept in the **Workers KV** namespace
+`COMMERCE_CACHE` (binding in `wrangler.toml`) for a day, the same copy for every
+data center. Response headers show what happened: `x-commerce-cache: HIT`
+(from KV) / `MISS` (loaded from Shopify and saved) / `BYPASS` (no KV binding,
+old one-minute cache), `x-commerce-version` and `ETag` (hash of the data),
+`x-commerce-saved-at`. Browsers re-check every time (`max-age=0` + ETag → 304).
+
+The **change watcher** (Cron Trigger every minute, `[triggers]` in
+`wrangler.toml`) loads the catalog from Shopify and compares its version with
+the cached one. Changed → the KV copy is replaced at once and the change is
+recorded; unchanged → nothing is written (KV free plan: 1,000 writes a day),
+except a refill an hour before the copy would expire. Shopify down → the cached
+copy stays. A Shopify change shows on the site within about 1–2 minutes (cron
+interval + KV propagation).
+
+`GET /commerce/cache-status.json` shows the cached version, when it was saved,
+its age and the last change (e.g. `TENT-001 price 379 → 349`).
+
+**Cache admin API** — `POST /commerce/invalidate` with
+`Authorization: Bearer <CACHE_ADMIN_TOKEN>` and an optional JSON body
+`{"mode":"refresh"}` (default: check Shopify now, replace the copy if changed)
+or `{"mode":"clear"}` (delete the copy; the next visitor reloads it). For
+manual clearing, Shopify webhooks or an Adobe I/O action. Off (404) without the
+secret; wrong or missing token → 401.
+
+Setup: Storage & databases → Workers KV → create `COMMERCE_CACHE`, put its id
+in `wrangler.toml`; secret `CACHE_ADMIN_TOKEN` for the cache admin API. Don't
+add the KV binding or the cron trigger in the dashboard — deploys use
+`wrangler.toml`.
