@@ -4,8 +4,9 @@
  * line total, then the order summary (items, member savings, shipping, total)
  * with Checkout and Continue shopping.
  *
- * Prices come from the product API; signed-in members (checked with the
- * worker) pay the member price. Free shipping from FREE_SHIPPING_FROM.
+ * Prices and stock come from the cart API (scripts/cart.js); signed-in
+ * members pay the member price. Lines changed by live stock get a notice.
+ * Free shipping from FREE_SHIPPING_FROM.
  * Authored block: no rows needed.
  */
 
@@ -123,6 +124,21 @@ async function render(block) {
   actions.append(link('Checkout', CHECKOUT_PAGE, 'button primary'), link('Continue shopping', SHOP_PAGE, 'cart-continue'));
   summary.append(actions);
 
+  // live stock changed the cart (e.g. "only 3 left"): say so above the lines
+  const notices = (cart.notices || []).map((text) => {
+    const p = document.createElement('p');
+    p.className = 'cart-notice';
+    p.textContent = text;
+    return p;
+  });
+  if (notices.length) {
+    const box = document.createElement('div');
+    box.className = 'cart-notices';
+    box.setAttribute('role', 'status');
+    box.append(...notices);
+    block.replaceChildren(box, list, summary);
+    return;
+  }
   block.replaceChildren(list, summary);
 }
 

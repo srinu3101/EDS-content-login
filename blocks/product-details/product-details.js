@@ -1,8 +1,10 @@
 /*
  * product-details — the product detail page (PDP). One page serves every
- * product: it reads ?sku= from the address, finds that product in the demo
- * product API (Shopify via the worker, else /data/products) and shows photo, name, category, price,
- * member price, stock and description.
+ * product: it reads ?sku= from the address and shows that product's photos
+ * (gallery), name, category, stars (link to the Product Reviews block),
+ * price, member price, stock and description — from the worker's APIs
+ * (catalog, prices, inventory, product/{sku}, ratings; see
+ * scripts/products.js), else the /data/products sheet.
  *
  * Authored block, every row optional:
  *   "Source"    | /data/products.json   → force another product API address
@@ -12,7 +14,8 @@
 
 import { createOptimizedPicture } from '../../scripts/aem.js';
 import {
-  PRODUCTS_PATH, SHOP_PAGE, buildPrice, fetchProducts, readConfig, sitePath, stockLabel,
+  PRODUCTS_PATH, SHOP_PAGE, buildPrice, buildRating, fetchProduct, fetchRatings, readConfig,
+  sitePath, stockLabel,
 } from '../../scripts/products.js';
 import {
   CART_PAGE, MAX_QTY, addToCart, getCart,
@@ -64,6 +67,48 @@ function buildPurchase(product) {
   return wrap;
 }
 
+const picture = (image, alt) => {
+  const pic = createOptimizedPicture(image.url, alt, true, [
+    { media: '(min-width: 900px)', width: '1200' }, { width: '750' },
+  ]);
+  const img = pic.querySelector('img');
+  if (img) img.fetchPriority = 'high';
+  return pic;
+};
+
+// main photo + thumbnails (when there is more than one photo)
+function buildGallery(product) {
+  const media = document.createElement('div');
+  media.className = 'product-details-media';
+  const { images } = product;
+  if (!images.length) return media;
+  const main = document.createElement('div');
+  main.className = 'product-details-photo';
+  main.append(picture(images[0], images[0].alt || product.name));
+  media.append(main);
+  if (images.length < 2) return media;
+
+  const thumbs = document.createElement('ul');
+  thumbs.className = 'product-details-thumbs';
+  thumbs.setAttribute('aria-label', 'Product photos');
+  images.forEach((image, i) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('aria-label', `Show photo ${i + 1} of ${images.length}`);
+    button.setAttribute('aria-pressed', String(i === 0));
+    button.append(createOptimizedPicture(image.url, '', false, [{ width: '160' }]));
+    button.addEventListener('click', () => {
+      main.replaceChildren(picture(image, image.alt || product.name));
+      thumbs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === button)));
+    });
+    li.append(button);
+    thumbs.append(li);
+  });
+  media.append(thumbs);
+  return media;
+}
+
 function backLink(shop) {
   const p = document.createElement('p');
   p.className = 'product-details-back';
@@ -91,9 +136,10 @@ export default async function decorate(block) {
   block.replaceChildren();
   block.setAttribute('aria-busy', 'true');
 
-  const sku = (new URLSearchParams(window.location.search).get('sku') || '').trim().toLowerCase();
-  const products = sku ? await fetchProducts(sitePath(config.source, PRODUCTS_PATH)) : [];
-  const product = products.find((p) => p.sku.toLowerCase() === sku);
+  const sku = (new URLSearchParams(window.location.search).get('sku') || '').trim();
+  const [product, ratings] = await Promise.all([
+    fetchProduct(sku, sitePath(config.source, PRODUCTS_PATH)), fetchRatings(),
+  ]);
   block.removeAttribute('aria-busy');
   if (!product) {
     notFound(block, shop);
@@ -102,15 +148,7 @@ export default async function decorate(block) {
 
   document.title = `${product.name} | WKND Shop`;
 
-  const media = document.createElement('div');
-  media.className = 'product-details-media';
-  if (product.image) {
-    media.append(createOptimizedPicture(product.image, product.name, true, [
-      { media: '(min-width: 900px)', width: '1200' }, { width: '750' },
-    ]));
-    const img = media.querySelector('img');
-    if (img) img.fetchPriority = 'high';
-  }
+  const media = buildGallery(product);
 
   const info = document.createElement('div');
   info.className = 'product-details-info';
@@ -125,7 +163,19 @@ export default async function decorate(block) {
   const sku2 = document.createElement('p');
   sku2.className = 'product-details-sku';
   sku2.textContent = `SKU: ${product.sku}`;
-  info.append(h1, sku2, buildPrice(product));
+  info.append(h1, sku2);
+  // stars → the Product Reviews block (#reviews) when the page has one
+  const rating = ratings.get(product.sku);
+  const reviewsLink = document.querySelector('.product-reviews') ? '#reviews' : '';
+  if (rating && rating.count > 0) info.append(buildRating(rating, reviewsLink));
+  else if (reviewsLink && ratings.size) {
+    const first = document.createElement('a');
+    first.className = 'product-details-first-review';
+    first.href = reviewsLink;
+    first.textContent = 'No reviews yet — write the first one';
+    info.append(first);
+  }
+  info.append(buildPrice(product));
 
   const stock = stockLabel(product.stock);
   const stockEl = document.createElement('p');

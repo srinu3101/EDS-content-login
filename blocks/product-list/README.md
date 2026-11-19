@@ -1,21 +1,27 @@
 # product-list
 
-The shop's product listing page (PLP), e.g. `/us/en/shop`. Reads the demo
-product API — the Document Authoring sheet `/data/products`, served as
-`/data/products.json` — and shows a card grid (photo, category, name, price,
-member price, stock) with category filter tabs. Each card opens the product
-page with `?sku=`.
+The shop's product listing page (PLP), e.g. `/us/en/shop`. Shows a card grid
+(photo, category, name, stars, price, member price, stock) with category
+filter tabs. Each card opens the product page with `?sku=`.
+
+Data (see `scripts/products.js`): on the Cloudflare worker the separate
+commerce APIs `/commerce/catalog.json` + `prices.json` + `inventory.json`
+(Shopify, each cached for its own time) and `/commerce/ratings.json` for the
+stars (shown only for products with reviews); otherwise — Adobe hosts, local
+dev, or the APIs failing — the Document Authoring sheet `/data/products`.
 
 ## Authoring (Document Authoring)
 
 | Product List |  |
 | --- | --- |
-| Source | /data/products.json |
+| Source | /commerce/products.json |
 | Product Page | /us/en/shop/product |
 | Category | Surf |
 
 - Every row is optional; the values above (without Category) are the defaults.
 - `Category`: show only that category, without filter tabs.
+- `Source`: leave it out (default: the worker's commerce APIs, falling back to
+  the sheet). `/data/products.json` forces the sheet.
 - A tab can be preselected from the address: `/us/en/shop?category=climbing`.
 
 ## Products sheet
