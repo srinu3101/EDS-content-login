@@ -1,10 +1,12 @@
 /*
  * cart — the demo shop cart, kept in the visitor's browser (localStorage).
  *
- * Only SKUs and quantities are stored; prices always come from the product
- * API (scripts/products.js), so nothing in the browser can change a price.
- * Signed-in members pay the member price — sign-in is checked with the
- * Cloudflare worker (/auth/me), never with the hint cookie.
+ * Only SKUs and quantities are stored; prices always come from the server,
+ * so nothing in the browser can change a price. With the Cloudflare worker
+ * the cart is priced by POST /commerce/cart (live prices, member price when
+ * signed in, live stock — never cached); without it (Adobe hosts, local dev,
+ * or the cart API failing) from the product API (scripts/products.js), with
+ * sign-in checked by /auth/me, never by the hint cookie.
  * Every change fires a `cart:change` event on window ({ detail: { count } }).
  */
 
@@ -16,6 +18,7 @@ export const CART_PAGE = '/us/en/shop/cart';
 export const CHECKOUT_PAGE = '/us/en/shop/checkout';
 export const FREE_SHIPPING_FROM = 200;
 export const SHIPPING_COST = 10;
+const CART_API = '/commerce/cart';
 
 const clampQty = (qty, max = MAX_QTY) => Math.max(0, Math.min(Math.floor(Number(qty) || 0), max));
 
@@ -104,13 +107,8 @@ export function isMember() {
   return member;
 }
 
-/**
- * The cart priced from the product API: unknown products are dropped and
- * quantities are capped at the stock.
- * @returns {Promise<{lines: Array, count: number, subtotal: number, regular: number,
- *   savings: number, shipping: number, total: number, member: boolean}>}
- */
-export async function pricedCart() {
+// the cart priced in the browser from the product API (fallback)
+async function localPricedCart() {
   const [products, signedIn] = await Promise.all([fetchProducts(), isMember()]);
   const bySku = new Map(products.map((p) => [p.sku, p]));
   const lines = getCart()
@@ -143,6 +141,58 @@ export async function pricedCart() {
     shipping,
     total: subtotal + shipping,
     member: signedIn,
+    notices: [],
+  };
+}
+
+async function serverCart(lines) {
+  try {
+    const resp = await fetch(CART_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ items: lines }),
+    });
+    const json = resp.ok ? await resp.json() : null;
+    return json && Array.isArray(json.lines) ? json : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * The cart priced with live prices and stock: unknown or sold-out products are
+ * dropped and quantities are capped at the stock, with a notice for each.
+ * @returns {Promise<{lines: Array, count: number, subtotal: number, regular: number,
+ *   savings: number, shipping: number, total: number, member: boolean, notices: string[]}>}
+ */
+export async function pricedCart() {
+  const lines = getCart();
+  if (!hasWorker() || !lines.length) return localPricedCart();
+  const [products, server] = await Promise.all([fetchProducts(), serverCart(lines)]);
+  const bySku = new Map(products.map((p) => [p.sku, p]));
+  if (!server || !server.lines.every((l) => bySku.has(l.sku))) return localPricedCart();
+  const name = (sku) => (bySku.get(sku) || { name: sku }).name;
+  return {
+    lines: server.lines.map((l) => ({
+      product: { ...bySku.get(l.sku), price: l.price, memberPrice: l.memberPrice },
+      qty: l.qty,
+      unit: l.unit,
+      regular: l.regular,
+      total: l.total,
+      max: l.max,
+    })),
+    count: server.count,
+    subtotal: server.subtotal,
+    regular: server.regular,
+    savings: server.savings,
+    shipping: server.shipping,
+    total: server.total,
+    member: server.member === true,
+    notices: [
+      ...(server.adjusted || []).map((a) => `${name(a.sku)}: ${a.reason}, quantity set to ${a.qty}.`),
+      ...(server.removed || []).map((r) => `${name(r.sku)} is ${r.reason} and is not included.`),
+    ],
   };
 }
 

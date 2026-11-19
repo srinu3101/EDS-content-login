@@ -1,8 +1,9 @@
 /*
  * product-list — the shop's product listing page (PLP). Reads the product
- * API (Shopify via the worker, else the /data/products sheet — see
- * scripts/products.js) and shows a card grid with category filter tabs;
- * each card links to the product page.
+ * APIs (Shopify via the worker: catalog + prices + inventory, else the
+ * /data/products sheet — see scripts/products.js) and shows a card grid with
+ * category filter tabs; each card links to the product page and shows the
+ * product's stars from /commerce/ratings.json when it has reviews.
  *
  * Authored block, every row optional:
  *   "Category"     | Surf                  → show only this category (no tabs)
@@ -13,8 +14,8 @@
 
 import { createOptimizedPicture } from '../../scripts/aem.js';
 import {
-  PRODUCTS_PATH, PRODUCT_PAGE, buildPrice, fetchProducts, productUrl, readConfig, sitePath,
-  stockLabel,
+  PRODUCTS_PATH, PRODUCT_PAGE, buildPrice, buildRating, fetchProducts, fetchRatings, productUrl,
+  readConfig, sitePath, stockLabel,
 } from '../../scripts/products.js';
 import { MAX_QTY, addToCart } from '../../scripts/cart.js';
 
@@ -44,7 +45,7 @@ function buildAddButton(product, announce) {
 
 const toKey = (s) => (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-function buildCard(product, page, announce) {
+function buildCard(product, page, announce, rating) {
   const li = document.createElement('li');
   li.className = 'product-list-card';
   li.dataset.category = toKey(product.category);
@@ -78,7 +79,9 @@ function buildCard(product, page, announce) {
   const stockEl = document.createElement('p');
   stockEl.className = `product-stock product-stock-${stock.state}`;
   stockEl.textContent = stock.text;
-  body.append(title, buildPrice(product), stockEl, buildAddButton(product, announce));
+  body.append(title);
+  if (rating && rating.count > 0) body.append(buildRating(rating));
+  body.append(buildPrice(product), stockEl, buildAddButton(product, announce));
 
   li.append(imageCell, body);
   return li;
@@ -98,8 +101,10 @@ export default async function decorate(block) {
   block.setAttribute('aria-busy', 'true');
 
   const fixed = toKey(config.category);
-  const products = (await fetchProducts(sitePath(config.source, PRODUCTS_PATH)))
-    .filter((p) => !fixed || toKey(p.category) === fixed);
+  const [all, ratings] = await Promise.all([
+    fetchProducts(sitePath(config.source, PRODUCTS_PATH)), fetchRatings(),
+  ]);
+  const products = all.filter((p) => !fixed || toKey(p.category) === fixed);
   block.removeAttribute('aria-busy');
   if (!products.length) {
     block.append(message(fixed ? 'No products in this category yet.' : 'Products could not be loaded. Please try again later.'));
@@ -113,7 +118,7 @@ export default async function decorate(block) {
 
   const grid = document.createElement('ul');
   grid.className = 'product-list-grid';
-  products.forEach((p) => grid.append(buildCard(p, page, announce)));
+  products.forEach((p) => grid.append(buildCard(p, page, announce, ratings.get(p.sku))));
 
   if (!fixed) {
     const categories = [...new Map(products

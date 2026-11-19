@@ -57,12 +57,15 @@
  * (newest first, ?page=n), 3 related (same category / tag) and 5 latest (never
  * the article itself). No index → page unchanged (blocks fill themselves).
  *
- * COMMERCE: GET /commerce/products.json returns the Shopify catalog (Storefront
- * API, products tagged `wknd-shop`) in the shape the shop blocks read — the
- * same as the /data/products sheet. The Storefront token never leaves the
- * worker. Answers are kept in the COMMERCE_CACHE KV namespace for a day
- * (x-commerce-cache: HIT / MISS, ETag = content version); without KV they are
- * cached for a minute (x-commerce-cache: BYPASS).
+ * COMMERCE: Shopify (Storefront API, products tagged `wknd-shop`) as separate
+ * JSON APIs, each cached for its own time and refreshed only when its data
+ * changes: /commerce/catalog.json, product/{sku}.json, prices.json,
+ * inventory.json, products.json (all in one, the /data/products sheet shape),
+ * POST /commerce/cart (priced live, private), reviews/{sku}.json and
+ * ratings.json (Bazaarvoice format, mock from a sheet), cache-status.json and the
+ * invalidate admin API. A Cron Trigger compares Shopify with the cache every
+ * minute (scheduled). The Storefront token never leaves the worker.
+ * Headers: x-commerce-cache HIT / MISS / BYPASS, x-commerce-version (= ETag).
  *
  * Environment variables:
  *   ORIGIN_HOSTNAME    main--eds-content-login--srinu3101.aem.live
@@ -77,6 +80,9 @@
  *   SHOPIFY_STOREFRONT_TOKEN  Storefront API public access token (secret)
  *   SHOPIFY_API_VERSION       optional, defaults to SHOPIFY_DEFAULT_VERSION
  *   CACHE_ADMIN_TOKEN         protects the commerce cache admin API (secret)
+ *   BAZAARVOICE_PASSKEY       optional: real Bazaarvoice reviews (secret); without
+ *                             it /commerce/reviews/* is a mock from /data/reviews
+ *   BAZAARVOICE_ENVIRONMENT   optional: staging (default) | production
  *
  * Bindings (wrangler.toml):
  *   COMMERCE_CACHE            KV namespace for the commerce JSON cache
@@ -319,7 +325,7 @@ const isSignedIn = async (request, env) => {
 /* -------------------------------------------------------------- COMMERCE */
 
 const SHOPIFY_DEFAULT_VERSION = '2025-10';
-const COMMERCE_CACHE_SECONDS = 60;
+const COMMERCE_CACHE_SECONDS = 60; // without the KV binding (BYPASS)
 const SHOP_TAG = 'wknd-shop';
 const MEMBER_PRICE_TAG = /^member-price-(\d+(?:\.\d+)?)$/i;
 
@@ -329,6 +335,7 @@ const PRODUCTS_QUERY = `query Products($cursor: String, $query: String) {
     nodes {
       handle title description productType tags
       featuredImage { url altText }
+      images(first: 6) { nodes { url altText } }
       variants(first: 1) {
         nodes { id sku availableForSale quantityAvailable price { amount } }
       }
@@ -361,6 +368,10 @@ const shopifyQuery = async (env, query, variables) => {
   return json.data;
 };
 
+const commerceConfigured = (env) => Boolean(
+  env.SHOPIFY_STORE_DOMAIN && env.SHOPIFY_STOREFRONT_TOKEN,
+);
+
 // one Shopify product (first variant) → { sku, name, category, price, … }
 const toShopProduct = (node) => {
   const variant = (node.variants && node.variants.nodes && node.variants.nodes[0]) || {};
@@ -382,8 +393,8 @@ const toShopProduct = (node) => {
   };
 };
 
-// the products.json body, straight from Shopify (no cache)
-const loadShopifyProducts = async (env) => {
+// every shop product straight from Shopify (no cache)
+const loadShopifyNodes = async (env) => {
   const nodes = [];
   let cursor = null;
   for (let page = 0; page < 10; page += 1) {
@@ -393,108 +404,73 @@ const loadShopifyProducts = async (env) => {
     if (!data.products.pageInfo.hasNextPage) break;
     cursor = data.products.pageInfo.endCursor;
   }
-  const products = nodes.map(toShopProduct).filter((p) => p.sku && p.name && p.price);
-  return JSON.stringify({
-    total: products.length, offset: 0, limit: products.length, data: products, source: 'shopify',
-  });
+  return nodes;
 };
 
 /*
- * COMMERCE CACHE: with the COMMERCE_CACHE KV binding (wrangler.toml) the JSON
- * is kept in Cloudflare KV — one copy for every data center — for a day, with
- * metadata { version, savedAt }. version is a hash of the body, so the same
- * data always has the same version (ETag). Without the binding the worker
- * falls back to the per-data-center Cache API for a minute.
+ * COMMERCE APIS — one Shopify read, split by how often the data changes, so a
+ * change only clears the API it belongs to:
+ *
+ *   API                     contains                              kept in KV
+ *   products.json           everything (older code, sheet shape)  1 day
+ *   catalog.json            PLP list: sku, name, category, image  1 hour
+ *   product/{sku}.json      PDP: description, photos, details     1 hour
+ *   prices.json             price, member price                   15 minutes
+ *   inventory.json          stock, available                      edge, 10 s
+ *   cart (POST)             the visitor's cart priced live        never
+ *
+ * KV entries carry metadata { version, savedAt }; version is a hash of the
+ * body (= ETag), so the same data always has the same version. Browsers
+ * re-check every time (max-age=0 + ETag → 304), so a refreshed API shows at
+ * once. inventory.json changes too often for KV writes: it is cached for 10 s
+ * per data center (and per worker instance) instead.
  */
-const COMMERCE_KV_SECONDS = 86400;
-const PRODUCTS_KEY = 'products.json';
-
-const contentVersion = async (text) => {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('');
+const VIEW_SECONDS = {
+  products: 86400, catalog: 3600, product: 3600, prices: 900, reviews: 3600, ratings: 3600,
 };
-
-// saves products (loaded from Shopify unless given) in KV → { body, version, savedAt }
-const saveProducts = async (env, loaded) => {
-  const body = loaded || await loadShopifyProducts(env);
-  const entry = { body, version: await contentVersion(body), savedAt: new Date().toISOString() };
-  await env.COMMERCE_CACHE.put(PRODUCTS_KEY, body, {
-    expirationTtl: COMMERCE_KV_SECONDS,
-    metadata: { version: entry.version, savedAt: entry.savedAt },
-  });
-  return entry;
-};
-
-// browsers always re-check (cheap 304 from KV), so a cleared cache shows at once
-const cachedJson = (request, entry, state) => {
-  const etag = `"${entry.version}"`;
-  const headers = {
-    'content-type': 'application/json',
-    'cache-control': 'public, max-age=0, must-revalidate',
-    etag,
-    'x-commerce-cache': state,
-    'x-commerce-version': entry.version,
-    'x-commerce-saved-at': entry.savedAt,
-  };
-  if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
-  return new Response(request.method === 'HEAD' ? null : entry.body, { headers });
-};
-
-const handleCommerceProducts = async (request, env, ctx) => {
-  if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method Not Allowed', { status: 405 });
-  if (!env.SHOPIFY_STORE_DOMAIN || !env.SHOPIFY_STOREFRONT_TOKEN) {
-    return commerceJson({ error: 'Commerce is not configured' }, 404);
-  }
-
-  if (env.COMMERCE_CACHE) {
-    let stored = null;
-    try {
-      stored = await env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY);
-    } catch (e) {
-      stored = null; // KV unavailable → answer from Shopify below
-    }
-    if (stored && stored.value && stored.metadata && stored.metadata.version) {
-      return cachedJson(request, { body: stored.value, ...stored.metadata }, 'HIT');
-    }
-    try {
-      return cachedJson(request, await saveProducts(env), 'MISS');
-    } catch (e) {
-      // KV write failed or Shopify failed: try Shopify once more without KV
-    }
-  }
-
-  const cache = typeof caches !== 'undefined' ? caches.default : null;
-  const cacheKey = new Request(new URL('/commerce/products.json', request.url).href);
-  const cached = cache && await cache.match(cacheKey);
-  if (cached) return cached;
-  try {
-    const resp = new Response(await loadShopifyProducts(env), {
-      headers: {
-        'content-type': 'application/json',
-        'cache-control': `public, max-age=${COMMERCE_CACHE_SECONDS}`,
-        'x-commerce-cache': 'BYPASS',
-      },
-    });
-    if (cache && ctx && ctx.waitUntil) ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-    return resp;
-  } catch (e) {
-    return commerceJson({ error: 'Products could not be loaded from Shopify' }, 502);
-  }
-};
-
-/*
- * CHANGE WATCHER (Cron Trigger, wrangler.toml): every minute the worker loads
- * the catalog from Shopify and compares its version with the one in KV.
- * Changed → the KV copy is replaced at once (invalidate + refill, so visitors
- * never wait for Shopify) and the change is recorded for cache-status.json.
- * Unchanged → nothing is written (KV free plan: 1,000 writes a day), except a
- * refill shortly before the day-long copy would expire.
- */
+const INVENTORY_SECONDS = 10;
+const PRODUCT_VIEW = /^product\/([A-Za-z0-9_-]+)\.json$/;
 const STATUS_KEY = 'cache-status';
-const REFILL_BEFORE_SECONDS = 3600;
-const PRODUCT_FIELDS = ['name', 'category', 'price', 'memberPrice', 'stock', 'image', 'description'];
 
-const parseProducts = (body) => {
+// 'product/CAMP-001.json' → 'product', 'prices.json' → 'prices'
+const viewKind = (key) => key.split(/[/.]/)[0];
+
+const sheet = (data) => JSON.stringify({
+  total: data.length, offset: 0, limit: data.length, data, source: 'shopify',
+});
+
+// Shopify products → Map(key → JSON body) for every API
+const buildViews = (nodes) => {
+  const items = nodes.map((node) => ({ node, p: toShopProduct(node) }))
+    .filter(({ p }) => p.sku && p.name && p.price);
+  const list = items.map(({ p }) => p);
+  const views = new Map();
+  views.set('products.json', sheet(list));
+  views.set('catalog.json', sheet(list.map(({
+    sku, name, category, image, handle,
+  }) => ({
+    sku, name, category, image, handle,
+  }))));
+  views.set('prices.json', sheet(list.map(({ sku, price, memberPrice }) => ({ sku, price, memberPrice }))));
+  views.set('inventory.json', sheet(list.map(({ sku, stock }) => ({ sku, stock, available: stock !== '0' }))));
+  items.filter(({ p }) => PRODUCT_VIEW.test(`product/${p.sku}.json`)).forEach(({ node, p }) => {
+    const images = ((node.images && node.images.nodes) || []).map((i) => ({ url: i.url, alt: i.altText || '' }));
+    views.set(`product/${p.sku}.json`, JSON.stringify({
+      sku: p.sku,
+      name: p.name,
+      category: p.category,
+      description: p.description,
+      image: p.image,
+      images: images.length ? images : [{ url: p.image, alt: '' }].filter((i) => i.url),
+      handle: p.handle,
+      variantId: p.variantId,
+      source: 'shopify',
+    }));
+  });
+  return views;
+};
+
+const parseData = (body) => {
   try {
     return (JSON.parse(body).data || []);
   } catch (e) {
@@ -502,10 +478,526 @@ const parseProducts = (body) => {
   }
 };
 
-// what changed between two products.json bodies, e.g. "TENT-001 price 379 → 349"
+const contentVersion = async (text) => {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text));
+  return [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+const readStored = async (env, key) => {
+  const stored = await env.COMMERCE_CACHE.getWithMetadata(key);
+  if (stored && stored.value && stored.metadata && stored.metadata.version) {
+    return { body: stored.value, ...stored.metadata };
+  }
+  return null;
+};
+
+// saves one API body in KV for its cache time → { body, version, savedAt }
+const saveView = async (env, key, body) => {
+  const entry = { body, version: await contentVersion(body), savedAt: new Date().toISOString() };
+  await env.COMMERCE_CACHE.put(key, body, {
+    expirationTtl: VIEW_SECONDS[viewKind(key)],
+    metadata: { version: entry.version, savedAt: entry.savedAt },
+  });
+  return entry;
+};
+
+// readView loader for the Shopify APIs
+const shopifyView = async (env, key) => buildViews(await loadShopifyNodes(env)).get(key);
+
+// one API from KV, or loaded (Shopify by default) and saved → { entry, state } (null: unknown)
+const readView = async (env, key, load = shopifyView) => {
+  if (env.COMMERCE_CACHE) {
+    try {
+      const entry = await readStored(env, key);
+      if (entry) return { entry, state: 'HIT' };
+    } catch (e) {
+      // KV unavailable → answer from Shopify below
+    }
+  }
+  const body = await load(env, key);
+  if (body === undefined || body === null) return null;
+  if (env.COMMERCE_CACHE) {
+    try {
+      return { entry: await saveView(env, key, body), state: 'MISS' };
+    } catch (e) {
+      // KV write failed (e.g. daily write limit) → answer without saving
+    }
+  }
+  return {
+    entry: { body, version: await contentVersion(body), savedAt: new Date().toISOString() },
+    state: 'BYPASS',
+  };
+};
+
+const cachedJson = (request, entry, state, ttl) => {
+  const etag = `"${entry.version}"`;
+  const headers = {
+    'content-type': 'application/json',
+    'cache-control': state === 'BYPASS' ? `public, max-age=${COMMERCE_CACHE_SECONDS}` : 'public, max-age=0, must-revalidate',
+    etag,
+    'x-commerce-cache': state,
+    'x-commerce-version': entry.version,
+    'x-commerce-saved-at': entry.savedAt,
+    'x-commerce-ttl': String(ttl),
+  };
+  if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
+  return new Response(request.method === 'HEAD' ? null : entry.body, { headers });
+};
+
+const SKU_VIEW = /^(?:product|reviews)\/([A-Za-z0-9_-]+)\.json$/;
+
+const handleView = async (request, env, key, load = shopifyView) => {
+  if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method Not Allowed', { status: 405 });
+  if (!commerceConfigured(env)) return commerceJson({ error: 'Commerce is not configured' }, 404);
+  try {
+    // unknown SKU and a cached catalog → 404 without asking Shopify
+    const sku = (key.match(SKU_VIEW) || [])[1];
+    if (sku && env.COMMERCE_CACHE) {
+      const catalog = await readStored(env, 'catalog.json').catch(() => null);
+      if (catalog && !parseData(catalog.body).some((p) => p.sku === sku)) {
+        return commerceJson({ error: 'Product not found' }, 404);
+      }
+    }
+    const result = await readView(env, key, load);
+    if (!result) return commerceJson({ error: 'Product not found' }, 404);
+    return cachedJson(request, result.entry, result.state, VIEW_SECONDS[viewKind(key)]);
+  } catch (e) {
+    return commerceJson({ error: `${key} could not be loaded` }, 502);
+  }
+};
+
+// inventory.json: 10 s per worker instance and per data center (no KV writes)
+let inventoryMemory = null; // { body, version, savedAt, at }
+
+const readInventory = async (env) => {
+  if (inventoryMemory && Date.now() - inventoryMemory.at < INVENTORY_SECONDS * 1000) {
+    return { entry: inventoryMemory, state: 'HIT' };
+  }
+  const cache = typeof caches !== 'undefined' ? caches.default : null;
+  const cacheKey = 'https://commerce.cache/inventory.json';
+  const cached = cache && await cache.match(cacheKey).catch(() => null);
+  if (cached) {
+    const body = await cached.text();
+    const savedAt = cached.headers.get('x-commerce-saved-at') || new Date().toISOString();
+    inventoryMemory = {
+      body, version: await contentVersion(body), savedAt, at: Date.parse(savedAt) || Date.now(),
+    };
+    return { entry: inventoryMemory, state: 'HIT' };
+  }
+  const body = buildViews(await loadShopifyNodes(env)).get('inventory.json');
+  const savedAt = new Date().toISOString();
+  inventoryMemory = {
+    body, version: await contentVersion(body), savedAt, at: Date.now(),
+  };
+  if (cache) {
+    await cache.put(cacheKey, new Response(body, {
+      headers: { 'cache-control': `max-age=${INVENTORY_SECONDS}`, 'x-commerce-saved-at': savedAt },
+    })).catch(() => {});
+  }
+  return { entry: inventoryMemory, state: 'MISS' };
+};
+
+const handleInventory = async (request, env) => {
+  if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method Not Allowed', { status: 405 });
+  if (!commerceConfigured(env)) return commerceJson({ error: 'Commerce is not configured' }, 404);
+  try {
+    const { entry, state } = await readInventory(env);
+    const resp = cachedJson(request, entry, state, INVENTORY_SECONDS);
+    if (resp.status === 200) resp.headers.set('cache-control', `public, max-age=${INVENTORY_SECONDS}`);
+    return resp;
+  } catch (e) {
+    return commerceJson({ error: 'Stock could not be loaded from Shopify' }, 502);
+  }
+};
+
+/*
+ * CART API: POST /commerce/cart { "items": [{ "sku": "CAMP-001", "qty": 2 }] }
+ * prices the visitor's cart (kept in their browser) with live prices
+ * (prices.json), the member price when signed in, and live stock
+ * (inventory.json): unknown or sold-out products are removed, quantities are
+ * capped at the stock. Private, never cached.
+ */
+const CART_MAX_QTY = 10;
+const CART_MAX_LINES = 50;
+const FREE_SHIPPING_FROM = 200;
+const SHIPPING_COST = 10;
+
+const privateJson = (body, status = 200) => new Response(JSON.stringify(body), {
+  status,
+  headers: { 'content-type': 'application/json', 'cache-control': 'private, no-store' },
+});
+
+const handleCart = async (request, env) => {
+  if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { allow: 'POST' } });
+  if (!commerceConfigured(env)) return commerceJson({ error: 'Commerce is not configured' }, 404);
+  let items;
+  try {
+    ({ items } = await request.json());
+  } catch (e) {
+    items = null;
+  }
+  if (!Array.isArray(items)) return privateJson({ error: 'Send { "items": [{ "sku": "…", "qty": 1 }] }' }, 400);
+
+  // same SKU twice → one line
+  const wanted = new Map();
+  items.slice(0, CART_MAX_LINES).forEach((item) => {
+    const sku = item && typeof item.sku === 'string' ? item.sku.trim() : '';
+    const qty = Math.floor(Number(item && item.qty) || 0);
+    if (sku && qty > 0) wanted.set(sku, (wanted.get(sku) || 0) + qty);
+  });
+
+  try {
+    const [prices, inventory, member] = await Promise.all([
+      readView(env, 'prices.json'), readInventory(env), isSignedIn(request, env),
+    ]);
+    const priceBySku = new Map(parseData(prices.entry.body).map((p) => [p.sku, p]));
+    const stockBySku = new Map(parseData(inventory.entry.body).map((p) => [p.sku, p]));
+    const lines = [];
+    const removed = [];
+    const adjusted = [];
+    wanted.forEach((requested, sku) => {
+      const p = priceBySku.get(sku);
+      if (!p) {
+        removed.push({ sku, reason: 'not available' });
+        return;
+      }
+      const stockText = (stockBySku.get(sku) || {}).stock;
+      const stock = stockText === '' || stockText === undefined ? CART_MAX_QTY : Number(stockText);
+      const max = Math.min(stock, CART_MAX_QTY);
+      if (max <= 0) {
+        removed.push({ sku, reason: 'out of stock' });
+        return;
+      }
+      const qty = Math.min(requested, max);
+      if (qty < requested) {
+        const reason = stock < CART_MAX_QTY ? `only ${stock} left` : `at most ${CART_MAX_QTY}`;
+        adjusted.push({
+          sku, requested, qty, reason,
+        });
+      }
+      const price = Number(p.price);
+      const memberPrice = p.memberPrice === '' ? null : Number(p.memberPrice);
+      const unit = member && memberPrice !== null ? memberPrice : price;
+      lines.push({
+        sku, qty, unit, price, memberPrice, total: unit * qty, regular: price * qty, max,
+      });
+    });
+    const subtotal = lines.reduce((s, l) => s + l.total, 0);
+    const regular = lines.reduce((s, l) => s + l.regular, 0);
+    const shipping = !lines.length || subtotal >= FREE_SHIPPING_FROM ? 0 : SHIPPING_COST;
+    return privateJson({
+      lines,
+      removed,
+      adjusted,
+      count: lines.reduce((n, l) => n + l.qty, 0),
+      subtotal,
+      regular,
+      savings: regular - subtotal,
+      shipping,
+      total: subtotal + shipping,
+      currency: 'USD',
+      member,
+      pricedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    return privateJson({ error: 'The cart could not be priced right now' }, 502);
+  }
+};
+
+/*
+ * REVIEWS (Bazaarvoice) — customer reviews and ratings in the Bazaarvoice
+ * Conversations API format, cached and watched like the product APIs:
+ *
+ *   GET  /commerce/reviews/{sku}.json  one product's reviews + statistics   KV, 1 hour
+ *   GET  /commerce/ratings.json        stars + review count, every product   KV, 1 hour
+ *   POST /commerce/reviews/{sku}.json  write a review (→ "awaiting moderation")
+ *
+ * Source: with BAZAARVOICE_PASSKEY (secret) the real Bazaarvoice API
+ * (BAZAARVOICE_ENVIRONMENT staging | production) — not tried yet, no
+ * Bazaarvoice account. Without it a MOCK BAZAARVOICE: approved rows of the
+ * /data/reviews sheet (SKU, Rating, Title, Review, Name, Location, Date,
+ * Recommended, Status) answered in the same format, so the blocks don't care
+ * which one is used. Submitted reviews are checked but never saved (a real
+ * Bazaarvoice moderates first); add a row to the sheet to "approve" one.
+ */
+const REVIEWS_VIEW = /^reviews\/([A-Za-z0-9_-]+)\.json$/;
+const REVIEWS_SHEET = '/data/reviews.json';
+const REVIEW_STATUS_KEY = 'cache-status-reviews';
+const REVIEWS_LIMIT = 100;
+const BV_API_VERSION = '5.4';
+
+const realBazaarvoice = (env) => Boolean(env.BAZAARVOICE_PASSKEY);
+const reviewsSource = (env) => (realBazaarvoice(env) ? 'bazaarvoice' : 'mock-bazaarvoice');
+
+const bvHost = (env) => (env.BAZAARVOICE_ENVIRONMENT === 'production'
+  ? 'api.bazaarvoice.com' : 'stg.api.bazaarvoice.com');
+
+const bvQuery = async (env, endpoint, params) => {
+  const url = new URL(`https://${bvHost(env)}/data/${endpoint}`);
+  url.searchParams.set('apiversion', BV_API_VERSION);
+  url.searchParams.set('passkey', env.BAZAARVOICE_PASSKEY);
+  params.forEach(([k, v]) => url.searchParams.append(k, v));
+  const resp = await fetch(url.href);
+  if (!resp.ok) throw new Error(`Bazaarvoice answered ${resp.status}`);
+  const json = await resp.json();
+  if (json.HasErrors) throw new Error('Bazaarvoice returned errors');
+  return json;
+};
+
+// sheet cell by column name, any case / spacing ("Review Text" = "reviewtext")
+const cell = (row, ...names) => {
+  const key = Object.keys(row).find((k) => names.includes(k.toLowerCase().replace(/[^a-z]/g, '')));
+  return key === undefined ? '' : String(row[key] ?? '').trim();
+};
+
+// "2026-11-10" or a spreadsheet day number → BV SubmissionTime
+const submissionTime = (value) => {
+  let date = /^\d{5}$/.test(value) ? new Date(Date.UTC(1899, 11, 30) + Number(value) * 86400000) : new Date(value);
+  if (Number.isNaN(date.getTime())) date = new Date(0);
+  return `${date.toISOString().slice(0, 23)}+00:00`;
+};
+
+const loadReviewRows = async (env) => {
+  const headers = {};
+  if (env.ORIGIN_AUTHENTICATION) headers.authorization = `token ${env.ORIGIN_AUTHENTICATION}`;
+  const resp = await fetch(`https://${env.ORIGIN_HOSTNAME}${REVIEWS_SHEET}?limit=5000`, { headers });
+  if (resp.status === 404) return []; // no sheet yet → no reviews
+  if (!resp.ok) throw new Error(`reviews sheet answered ${resp.status}`);
+  const json = await resp.json();
+  if (Array.isArray(json.data)) return json.data;
+  const first = json[':names'] && json[json[':names'][0]];
+  return (first && Array.isArray(first.data)) ? first.data : [];
+};
+
+// sheet rows → { sku: [BV review, …] } (approved, valid rows only, newest first)
+const mockReviews = (rows, skus) => {
+  const wanted = new Set(skus);
+  const bySku = {};
+  rows.forEach((row) => {
+    const sku = cell(row, 'sku', 'productid', 'product');
+    const rating = Math.round(Number(cell(row, 'rating', 'stars')));
+    const text = cell(row, 'review', 'reviewtext', 'text');
+    const status = cell(row, 'status');
+    if (!wanted.has(sku) || !(rating >= 1 && rating <= 5) || !text) return;
+    if (status && !/^approved$/i.test(status)) return;
+    const recommended = cell(row, 'recommended');
+    let isRecommended = null;
+    if (/^(yes|y|true|1)$/i.test(recommended)) isRecommended = true;
+    else if (/^(no|n|false|0)$/i.test(recommended)) isRecommended = false;
+    (bySku[sku] = bySku[sku] || []).push({
+      ProductId: sku,
+      Rating: rating,
+      RatingRange: 5,
+      Title: cell(row, 'title').slice(0, 200),
+      ReviewText: text.slice(0, 5000),
+      UserNickname: cell(row, 'name', 'nickname', 'usernickname').slice(0, 50) || 'Anonymous',
+      UserLocation: cell(row, 'location', 'userlocation').slice(0, 100) || null,
+      SubmissionTime: submissionTime(cell(row, 'date', 'submissiontime')),
+      IsRecommended: isRecommended,
+      ModerationStatus: 'APPROVED',
+      TotalPositiveFeedbackCount: Math.max(0, Math.floor(Number(cell(row, 'helpful')) || 0)),
+    });
+  });
+  Object.values(bySku).forEach((list) => {
+    list.sort((a, b) => b.SubmissionTime.localeCompare(a.SubmissionTime));
+    list.forEach((r, i) => { r.Id = `${r.ProductId}-${list.length - i}`; }); // oldest = 1
+  });
+  return bySku;
+};
+
+// BV ReviewStatistics for a list of reviews
+const reviewStatistics = (list) => {
+  const total = list.length;
+  const counts = [5, 4, 3, 2, 1].map((v) => ({
+    RatingValue: v, Count: list.filter((r) => r.Rating === v).length,
+  }));
+  const times = list.map((r) => r.SubmissionTime).sort();
+  const sum = list.reduce((s, r) => s + r.Rating, 0);
+  return {
+    TotalReviewCount: total,
+    AverageOverallRating: total ? Math.round((sum / total) * 100) / 100 : null,
+    OverallRatingRange: 5,
+    RatingDistribution: counts.filter((c) => c.Count > 0),
+    RecommendedCount: list.filter((r) => r.IsRecommended === true).length,
+    NotRecommendedCount: list.filter((r) => r.IsRecommended === false).length,
+    FirstSubmissionTime: times[0] || null,
+    LastSubmissionTime: times[times.length - 1] || null,
+  };
+};
+
+const bvReviewsBody = (sku, list, source) => JSON.stringify({
+  HasErrors: false,
+  Errors: [],
+  Locale: 'en_US',
+  Offset: 0,
+  Limit: REVIEWS_LIMIT,
+  TotalResults: list.length,
+  Results: list.slice(0, REVIEWS_LIMIT),
+  Includes: {
+    Products: { [sku]: { Id: sku, ReviewStatistics: reviewStatistics(list) } },
+    ProductsOrder: [sku],
+  },
+  source,
+});
+
+const bvRatingsBody = (stats, source) => JSON.stringify({
+  HasErrors: false,
+  Errors: [],
+  Locale: 'en_US',
+  Offset: 0,
+  Limit: stats.length,
+  TotalResults: stats.length,
+  Results: stats.map(({ sku, s }) => ({
+    ProductStatistics: {
+      ProductId: sku,
+      ReviewStatistics: {
+        AverageOverallRating: s.AverageOverallRating,
+        TotalReviewCount: s.TotalReviewCount,
+        OverallRatingRange: 5,
+      },
+    },
+  })),
+  source,
+});
+
+// ratings.json body → [{ sku, average, count }]
+const parseRatings = (body) => {
+  try {
+    return (JSON.parse(body).Results || []).map((r) => r.ProductStatistics || {}).map((p) => ({
+      sku: p.ProductId,
+      average: (p.ReviewStatistics || {}).AverageOverallRating ?? null,
+      count: (p.ReviewStatistics || {}).TotalReviewCount || 0,
+    })).filter((r) => r.sku);
+  } catch (e) {
+    return [];
+  }
+};
+
+// Map(key → body): reviews/{sku}.json for every SKU (+ ratings.json)
+const buildReviewViews = async (env, skus, { ratings = true } = {}) => {
+  const views = new Map();
+  const source = reviewsSource(env);
+  if (realBazaarvoice(env)) {
+    await Promise.all(skus.map(async (sku) => {
+      const json = await bvQuery(env, 'reviews.json', [
+        ['Filter', `ProductId:${sku}`], ['Include', 'Products'], ['Stats', 'Reviews'],
+        ['Sort', 'SubmissionTime:desc'], ['Limit', String(REVIEWS_LIMIT)],
+      ]);
+      views.set(`reviews/${sku}.json`, JSON.stringify({ ...json, source }));
+    }));
+    if (ratings && skus.length) {
+      const json = await bvQuery(env, 'statistics.json', [
+        ['Filter', `ProductId:${skus.slice(0, 100).join(',')}`], ['Stats', 'Reviews'],
+      ]);
+      views.set('ratings.json', JSON.stringify({ ...json, source }));
+    } else if (ratings) views.set('ratings.json', bvRatingsBody([], source));
+    return views;
+  }
+  const bySku = mockReviews(await loadReviewRows(env), skus);
+  skus.forEach((sku) => views.set(`reviews/${sku}.json`, bvReviewsBody(sku, bySku[sku] || [], source)));
+  if (ratings) {
+    views.set('ratings.json', bvRatingsBody(skus.map((sku) => ({ sku, s: reviewStatistics(bySku[sku] || []) })), source));
+  }
+  return views;
+};
+
+const catalogSkus = async (env) => {
+  const result = await readView(env, 'catalog.json');
+  return result ? parseData(result.entry.body).map((p) => p.sku) : [];
+};
+
+// readView loader for reviews/{sku}.json and ratings.json
+const reviewView = async (env, key) => {
+  const sku = (key.match(REVIEWS_VIEW) || [])[1];
+  if (sku) return (await buildReviewViews(env, [sku], { ratings: false })).get(key);
+  return (await buildReviewViews(env, await catalogSkus(env))).get(key);
+};
+
+/*
+ * Write a review: POST /commerce/reviews/{sku}.json
+ *   { "rating": 1-5, "title": "…", "text": "…", "name": "…", "recommended": true }
+ * Answers like Bazaarvoice's submitreview.json: FormErrors on bad input,
+ * otherwise a SubmissionId and "awaiting moderation". Nothing is stored.
+ */
+const REVIEW_TEXT_MIN = 20;
+
+const handleReviewSubmit = async (request, env, sku) => {
+  if (!commerceConfigured(env)) return commerceJson({ error: 'Commerce is not configured' }, 404);
+  if (realBazaarvoice(env)) {
+    return privateJson({ HasErrors: true, Errors: [{ Code: 'ERROR_NOT_IMPLEMENTED', Message: 'Use the Bazaarvoice submission form' }] }, 501);
+  }
+  let input = {};
+  try {
+    const text = await request.text();
+    if (text.length > 20000) return privateJson({ HasErrors: true, Errors: [{ Code: 'ERROR_REQUEST_LIMIT', Message: 'Too long' }] }, 413);
+    input = JSON.parse(text || '{}') || {};
+  } catch (e) {
+    return privateJson({ HasErrors: true, Errors: [{ Code: 'ERROR_PARAM_INVALID', Message: 'Send JSON' }] }, 400);
+  }
+  const skus = await catalogSkus(env).catch(() => null);
+  if (skus && !skus.includes(sku)) return commerceJson({ error: 'Product not found' }, 404);
+
+  const rating = Number(input.rating);
+  const title = String(input.title || '').trim();
+  const reviewText = String(input.text || '').trim();
+  const name = String(input.name || '').trim();
+  const fieldErrors = {};
+  const fail = (field, code, message) => {
+    fieldErrors[field] = { Field: field, Code: code, Message: message };
+  };
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) fail('rating', 'ERROR_FORM_REQUIRED', 'Choose 1 to 5 stars');
+  if (!title) fail('title', 'ERROR_FORM_REQUIRED', 'Add a title');
+  else if (title.length > 100) fail('title', 'ERROR_FORM_TOO_HIGH', 'Title: at most 100 characters');
+  if (reviewText.length < REVIEW_TEXT_MIN) fail('reviewtext', 'ERROR_FORM_TOO_LOW', `Review: at least ${REVIEW_TEXT_MIN} characters`);
+  else if (reviewText.length > 5000) fail('reviewtext', 'ERROR_FORM_TOO_HIGH', 'Review: at most 5,000 characters');
+  if (name.length < 2) fail('usernickname', 'ERROR_FORM_TOO_LOW', 'Name: at least 2 characters');
+  else if (name.length > 25) fail('usernickname', 'ERROR_FORM_TOO_HIGH', 'Name: at most 25 characters');
+
+  if (Object.keys(fieldErrors).length) {
+    return privateJson({
+      HasErrors: true, Errors: [], FormErrors: { FieldErrors: fieldErrors }, source: 'mock-bazaarvoice',
+    }, 400);
+  }
+  return privateJson({
+    HasErrors: false,
+    Errors: [],
+    FormErrors: {},
+    SubmissionId: `mock-${randomToken().slice(0, 12)}`,
+    TypicalHoursToPost: 72,
+    Review: { Id: null, ProductId: sku, ModerationStatus: 'SUBMITTED' },
+    message: 'Thanks! Your review is waiting for moderation.',
+    source: 'mock-bazaarvoice',
+  });
+};
+
+// "4.5★ (2)" — for the change record
+const ratingText = (r) => (r && r.count ? `${r.average}★ (${r.count})` : 'no reviews');
+
+const describeRatingChanges = (oldBody, newBody) => {
+  const before = new Map(parseRatings(oldBody).map((r) => [r.sku, r]));
+  return parseRatings(newBody)
+    .filter((r) => ratingText(before.get(r.sku)) !== ratingText(r))
+    .map((r) => ({
+      sku: r.sku, change: 'reviews', from: ratingText(before.get(r.sku)), to: ratingText(r),
+    }))
+    .slice(0, 50);
+};
+
+/*
+ * CHANGE WATCHER (Cron Trigger, wrangler.toml): every minute the worker reads
+ * Shopify once, builds every API and compares each version with KV. Only the
+ * APIs whose data changed are replaced (invalidate + refill, so visitors never
+ * wait for Shopify); a product that left the shop loses its product/{sku}.json.
+ * Unchanged → nothing is written (KV free plan: 1,000 writes a day), except a
+ * refill shortly before an entry would expire or after it expired.
+ */
+const REFILL_BEFORE_SECONDS = 120;
+const PRODUCT_FIELDS = ['name', 'category', 'price', 'memberPrice', 'stock', 'image', 'description'];
+
+// what changed between two products.json bodies, e.g. "CAMP-001 price 389 → 369"
 const describeChanges = (oldBody, newBody) => {
-  const before = new Map(parseProducts(oldBody).map((p) => [p.sku, p]));
-  const after = new Map(parseProducts(newBody).map((p) => [p.sku, p]));
+  const before = new Map(parseData(oldBody).map((p) => [p.sku, p]));
+  const after = new Map(parseData(newBody).map((p) => [p.sku, p]));
   const changes = [];
   after.forEach((p, sku) => {
     const old = before.get(sku);
@@ -524,66 +1016,164 @@ const describeChanges = (oldBody, newBody) => {
   return changes.slice(0, 50);
 };
 
-const checkProducts = async (env, trigger = 'watcher') => {
-  if (!env.COMMERCE_CACHE || !env.SHOPIFY_STORE_DOMAIN || !env.SHOPIFY_STOREFRONT_TOKEN) {
-    return { checked: false };
-  }
-  const body = await loadShopifyProducts(env);
-  const version = await contentVersion(body);
-  const stored = await env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY);
-  const meta = (stored && stored.metadata) || {};
-  if (stored && stored.value && meta.version === version) {
-    const age = (Date.now() - Date.parse(meta.savedAt)) / 1000;
-    const refill = !(age < COMMERCE_KV_SECONDS - REFILL_BEFORE_SECONDS);
-    if (refill) await saveProducts(env, body); // same data, refilled before it expires
-    return {
-      checked: true, changed: false, refilled: refill, version,
-    };
-  }
-  const entry = await saveProducts(env, body);
-  if (stored && stored.value) {
-    await env.COMMERCE_CACHE.put(STATUS_KEY, JSON.stringify({
-      changedAt: entry.savedAt,
-      trigger,
-      from: meta.version || '',
-      to: entry.version,
-      changes: describeChanges(stored.value, body),
-    }));
-  }
-  return { checked: true, changed: true, version: entry.version };
+// writes the views whose data changed; deletes the stale keys (from the old copies)
+const syncViews = async (env, views, staleKeys = () => []) => {
+  const keys = [...views.keys()];
+  const stored = await Promise.all(keys.map((key) => readStored(env, key).catch(() => null)));
+  const old = new Map(keys.map((key, i) => [key, stored[i]]));
+  const refreshed = [];
+  const filled = [];
+  await Promise.all(keys.map(async (key) => {
+    const body = views.get(key);
+    const before = old.get(key);
+    const version = await contentVersion(body);
+    if (before && before.version === version) {
+      const age = (Date.now() - Date.parse(before.savedAt)) / 1000;
+      if (age < VIEW_SECONDS[viewKind(key)] - REFILL_BEFORE_SECONDS) return;
+      await saveView(env, key, body); // same data, refilled before it expires
+      filled.push(key);
+      return;
+    }
+    await saveView(env, key, body);
+    if (before) refreshed.push({ api: key, from: before.version, to: version });
+    else filled.push(key);
+  }));
+  const removed = staleKeys(old).filter((key) => !views.has(key));
+  await Promise.all(removed.map((key) => env.COMMERCE_CACHE.delete(key)));
+  refreshed.sort((x, y) => x.api.localeCompare(y.api));
+  return {
+    old, refreshed, removed, filled: filled.sort(),
+  };
 };
 
-// GET /commerce/cache-status.json — what is cached now and the last change (demo)
+const syncResult = ({ refreshed, removed, filled }) => ({
+  checked: true,
+  changed: refreshed.length > 0 || removed.length > 0,
+  refreshed,
+  removed,
+  filled,
+});
+
+const checkCommerce = async (env, trigger = 'watcher') => {
+  if (!env.COMMERCE_CACHE || !commerceConfigured(env)) return { checked: false };
+  const views = buildViews(await loadShopifyNodes(env));
+  views.delete('inventory.json'); // edge-cached for 10 s, not kept in KV
+  // products that left the shop lose their product/{sku}.json
+  const result = await syncViews(env, views, (old) => {
+    const products = old.get('products.json');
+    return products ? parseData(products.body).map((p) => `product/${p.sku}.json`) : [];
+  });
+  if (result.refreshed.length || result.removed.length) {
+    const products = result.old.get('products.json');
+    await env.COMMERCE_CACHE.put(STATUS_KEY, JSON.stringify({
+      changedAt: new Date().toISOString(),
+      trigger,
+      refreshed: result.refreshed,
+      removed: result.removed,
+      changes: products ? describeChanges(products.body, views.get('products.json')) : [],
+    }));
+  }
+  return syncResult(result);
+};
+
+// reviews watcher: the sheet (or Bazaarvoice) for every catalog SKU
+const checkReviews = async (env, trigger = 'watcher') => {
+  if (!env.COMMERCE_CACHE || !commerceConfigured(env)) return { checked: false };
+  const views = await buildReviewViews(env, await catalogSkus(env));
+  const result = await syncViews(env, views, (old) => {
+    const ratings = old.get('ratings.json');
+    return ratings ? parseRatings(ratings.body).map((r) => `reviews/${r.sku}.json`) : [];
+  });
+  if (result.refreshed.length || result.removed.length) {
+    const ratings = result.old.get('ratings.json');
+    await env.COMMERCE_CACHE.put(REVIEW_STATUS_KEY, JSON.stringify({
+      changedAt: new Date().toISOString(),
+      trigger,
+      source: reviewsSource(env),
+      refreshed: result.refreshed,
+      removed: result.removed,
+      changes: ratings ? describeRatingChanges(ratings.body, views.get('ratings.json')) : [],
+    }));
+  }
+  return syncResult(result);
+};
+
+const describeSeconds = (s) => {
+  if (s >= 3600) return `${s / 3600} hour${s === 3600 ? '' : 's'}`;
+  if (s >= 60) return `${s / 60} minutes`;
+  return `${s} seconds`;
+};
+
+// the API keys known now: fixed ones + product/{sku}.json from the catalog
+const knownKeys = async (env) => {
+  const catalog = await readStored(env, 'catalog.json').catch(() => null)
+    || await readStored(env, 'products.json').catch(() => null);
+  const skus = catalog ? parseData(catalog.body).map((p) => p.sku) : [];
+  return [
+    'products.json', 'catalog.json', 'prices.json', 'ratings.json',
+    ...skus.map((sku) => `product/${sku}.json`), ...skus.map((sku) => `reviews/${sku}.json`),
+  ];
+};
+
+// GET /commerce/cache-status.json — every API: version, age, cache time; last change
 const handleCacheStatus = async (env) => {
   if (!env.COMMERCE_CACHE) return commerceJson({ cache: 'none' });
-  const [stored, lastChange] = await Promise.all([
-    env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY),
+  const keys = await knownKeys(env);
+  const [entries, lastChange, lastReviewChange] = await Promise.all([
+    Promise.all(keys.map((key) => readStored(env, key).catch(() => null))),
     env.COMMERCE_CACHE.get(STATUS_KEY, { type: 'json' }),
+    env.COMMERCE_CACHE.get(REVIEW_STATUS_KEY, { type: 'json' }),
   ]);
-  const meta = (stored && stored.value && stored.metadata) || null;
+  const count = (key, body) => {
+    if (['products', 'catalog', 'prices'].includes(viewKind(key))) return { count: parseData(body).length };
+    if (key === 'ratings.json') return { count: parseRatings(body).length };
+    if (REVIEWS_VIEW.test(key)) {
+      try {
+        return { reviews: JSON.parse(body).TotalResults };
+      } catch (e) {
+        return {};
+      }
+    }
+    return {};
+  };
+  const apis = {};
+  keys.forEach((key, i) => {
+    const e = entries[i];
+    apis[key] = {
+      keptFor: describeSeconds(VIEW_SECONDS[viewKind(key)]),
+      ...(e ? {
+        version: e.version,
+        savedAt: e.savedAt,
+        ageSeconds: Math.round((Date.now() - Date.parse(e.savedAt)) / 1000),
+        ...count(key, e.body),
+      } : { cached: false }),
+    };
+  });
+  apis['inventory.json'] = { keptFor: `${describeSeconds(INVENTORY_SECONDS)} (edge, per data center)` };
+  apis.cart = { keptFor: 'never (private)' };
   return commerceJson({
     cache: 'kv',
-    watcher: 'checks Shopify every minute',
-    keptFor: `${COMMERCE_KV_SECONDS / 3600} hours`,
-    products: meta ? {
-      version: meta.version,
-      savedAt: meta.savedAt,
-      ageSeconds: Math.round((Date.now() - Date.parse(meta.savedAt)) / 1000),
-      count: parseProducts(stored.value).length,
-    } : null,
+    watcher: 'checks Shopify and the reviews every minute',
+    reviewsSource: reviewsSource(env),
+    apis,
     lastChange: lastChange || null,
+    lastReviewChange: lastReviewChange || null,
   });
 };
 
 /*
  * CACHE ADMIN API: POST /commerce/invalidate with
  *   Authorization: Bearer <CACHE_ADMIN_TOKEN>
- * body (optional JSON) { "mode": "refresh" | "clear" }
- *   refresh (default) — check Shopify now, replace the cached copy if changed
- *   clear             — delete the cached copy; the next visitor reloads it
+ * body (optional JSON) { "mode": "refresh" | "clear", "api": "all" | "<api>" }
+ *   refresh (default) — check Shopify now, replace every API that changed
+ *   clear             — delete the cached copy of one API (e.g. prices.json,
+ *                       product/CAMP-001.json) or all; the next visitor or the
+ *                       watcher reloads it
  * For manual clearing, Shopify webhooks or an Adobe I/O action. Without the
  * secret the API is off (404).
  */
+const CLEARABLE = /^(products|catalog|prices|ratings)\.json$|^(product|reviews)\/[A-Za-z0-9_-]+\.json$/;
+
 const sha256Hex = async (text) => {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -606,32 +1196,54 @@ const handleInvalidate = async (request, env) => {
     });
   }
   let mode = 'refresh';
+  let api = 'all';
   try {
     const body = await request.json();
     if (body && body.mode) mode = String(body.mode);
+    if (body && body.api) api = String(body.api);
   } catch (e) {
-    // no / invalid body → refresh
+    // no / invalid body → refresh all
   }
   if (!['refresh', 'clear'].includes(mode)) return commerceJson({ error: 'mode must be refresh or clear' }, 400);
+  if (api !== 'all' && !CLEARABLE.test(api)) {
+    return commerceJson({ error: 'api must be all, products.json, catalog.json, prices.json, ratings.json, product/{sku}.json or reviews/{sku}.json (inventory.json refreshes itself every 10 s)' }, 400);
+  }
 
   if (mode === 'clear') {
-    const stored = await env.COMMERCE_CACHE.getWithMetadata(PRODUCTS_KEY);
-    const from = (stored && stored.metadata && stored.metadata.version) || '';
-    await env.COMMERCE_CACHE.delete(PRODUCTS_KEY);
-    const changedAt = new Date().toISOString();
+    const keys = api === 'all' ? await knownKeys(env) : [api];
+    await Promise.all(keys.map((key) => env.COMMERCE_CACHE.delete(key)));
+    const at = new Date().toISOString();
     await env.COMMERCE_CACHE.put(STATUS_KEY, JSON.stringify({
-      changedAt, trigger: 'manual clear', from, to: '', changes: [],
+      changedAt: at, trigger: 'manual clear', refreshed: [], removed: [], cleared: keys, changes: [],
     }));
     return commerceJson({
-      mode, cleared: true, from, at: changedAt,
+      mode, cleared: keys, at,
     });
   }
   try {
-    const result = await checkProducts(env, 'manual refresh');
-    return commerceJson({ mode, ...result });
+    const commerce = await checkCommerce(env, 'manual refresh');
+    const reviewsResult = await checkReviews(env, 'manual refresh');
+    return commerceJson({ mode, ...commerce, reviews: reviewsResult });
   } catch (e) {
-    return commerceJson({ mode, error: 'Shopify could not be reached; cached copy kept' }, 502);
+    return commerceJson({ mode, error: 'Shopify could not be reached; cached copies kept' }, 502);
   }
+};
+
+// every /commerce/* route
+const handleCommerce = (request, url, env) => {
+  const path = url.pathname.slice('/commerce/'.length);
+  if (['products.json', 'catalog.json', 'prices.json'].includes(path)) return handleView(request, env, path);
+  if (PRODUCT_VIEW.test(path)) return handleView(request, env, path);
+  if (REVIEWS_VIEW.test(path)) {
+    if (request.method === 'POST') return handleReviewSubmit(request, env, path.match(REVIEWS_VIEW)[1]);
+    return handleView(request, env, path, reviewView);
+  }
+  if (path === 'ratings.json') return handleView(request, env, path, reviewView);
+  if (path === 'inventory.json') return handleInventory(request, env);
+  if (path === 'cart') return handleCart(request, env);
+  if (path === 'cache-status.json') return handleCacheStatus(env);
+  if (path === 'invalidate') return handleInvalidate(request, env);
+  return commerceJson({ error: 'Not Found' }, 404);
 };
 
 /* ---------------------------------------------------------- END COMMERCE */
@@ -1019,7 +1631,7 @@ const assembleNews = async (request, resp, env, extension) => {
 
 /* -------------------------------------------------------------- END NEWS */
 
-const handleRequest = async (request, env, ctx) => {
+const handleRequest = async (request, env) => {
   const url = new URL(request.url);
   if (url.port) {
     // Cloudflare opens a couple more ports than 443, so we redirect visitors
@@ -1044,15 +1656,9 @@ const handleRequest = async (request, env, ctx) => {
     return handleAuth(request, url, env);
   }
 
-  // COMMERCE: the Shopify catalog for the shop blocks
-  if (url.pathname === '/commerce/products.json') {
-    return handleCommerceProducts(request, env, ctx);
-  }
-  if (url.pathname === '/commerce/cache-status.json') {
-    return handleCacheStatus(env);
-  }
-  if (url.pathname === '/commerce/invalidate') {
-    return handleInvalidate(request, env);
+  // COMMERCE: Shopify APIs for the shop blocks, cart, cache status and admin
+  if (url.pathname.startsWith('/commerce/')) {
+    return handleCommerce(request, url, env);
   }
 
   // LOCKED PAGES: /premium/* and /members/* only for signed-in visitors
@@ -1152,10 +1758,13 @@ export default {
   fetch: handleRequest,
   // CHANGE WATCHER: Cron Trigger (wrangler.toml [triggers])
   scheduled: (event, env, ctx) => {
-    ctx.waitUntil(checkProducts(env, 'watcher').catch((e) => {
-      // Shopify or KV unavailable: keep the cached copy, try again next minute
+    // Shopify, the reviews or KV unavailable: keep the cached copies, try again next minute
+    const log = (name) => (e) => {
       // eslint-disable-next-line no-console
-      console.log(`commerce watcher: ${e.message}`);
-    }));
+      console.log(`${name} watcher: ${e.message}`);
+    };
+    // reviews after products: they use the (refreshed) catalog's SKUs
+    ctx.waitUntil(checkCommerce(env, 'watcher').catch(log('commerce'))
+      .then(() => checkReviews(env, 'watcher').catch(log('reviews'))));
   },
 };
