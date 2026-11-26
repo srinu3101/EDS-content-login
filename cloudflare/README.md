@@ -184,3 +184,23 @@ Setup: Storage & databases → Workers KV → create `COMMERCE_CACHE`, put its i
 in `wrangler.toml`; secret `CACHE_ADMIN_TOKEN` for the cache admin API. Don't
 add the KV binding or the cron trigger in the dashboard — deploys use
 `wrangler.toml`.
+
+## News every 6 hours (`/news-status.json`)
+
+With the `COMMERCE_CACHE` KV binding the News list, Related and Latest
+articles (edge assembly) come from a **snapshot** of `/news-index.json`, taken
+by a second Cron Trigger at **00:00, 06:00, 12:00 and 18:00 IST**
+(`30 0,6,12,18 * * *` in `wrangler.toml`; Cloudflare cron times are UTC). An
+article published at 09:00 is live at its own address at once, and appears in
+the lists at 12:00 — the same moment for every visitor. `/news-index.json` is
+answered from the snapshot too (`x-news-snapshot: every 6 hours`), so nothing
+shows early. No snapshot yet → one is taken on the first news page view; index
+unreachable at an update time → the previous snapshot stays.
+
+- `GET /news-status.json` — last update (time in IST, articles added /
+  removed), next update time, number of articles.
+- Update now (demo): `POST /commerce/invalidate` with
+  `Authorization: Bearer <CACHE_ADMIN_TOKEN>` and `{"api":"news"}`
+  (`"mode":"clear"` deletes the snapshot; the next view takes a new one).
+- Back to live updates (new articles within ~1 minute): text variable
+  `NEWS_UPDATE` = `live`.
