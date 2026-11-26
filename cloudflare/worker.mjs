@@ -53,9 +53,14 @@
  *
  * NEWS (edge assembly): on /us/en/news and /us/en/news/* pages the worker
  * fills the news-list, related-articles and latest-articles placeholder blocks
- * from /news-index.json (cached ~60 s) before the page is sent — the News list
- * (newest first, ?page=n), 3 related (same category / tag) and 5 latest (never
- * the article itself). No index → page unchanged (blocks fill themselves).
+ * from the news index before the page is sent — the News list (newest first,
+ * ?page=n), 3 related (same category / tag) and 5 latest (never the article
+ * itself). No index → page unchanged (blocks fill themselves).
+ * NEWS EVERY 6 HOURS: with the COMMERCE_CACHE KV binding the lists come from a
+ * snapshot of /news-index.json taken at 00:00, 06:00, 12:00 and 18:00 IST (Cron
+ * Trigger), so new articles appear in the lists at the next update time.
+ * NEWS_UPDATE=live goes back to the live index (new articles within ~1 min).
+ * GET /news-status.json: last and next update, articles added.
  *
  * COMMERCE: Shopify (Storefront API, products tagged `wknd-shop`) as separate
  * JSON APIs, each cached for its own time and refreshed only when its data
@@ -83,6 +88,8 @@
  *   BAZAARVOICE_PASSKEY       optional: real Bazaarvoice reviews (secret); without
  *                             it /commerce/reviews/* is a mock from /data/reviews
  *   BAZAARVOICE_ENVIRONMENT   optional: staging (default) | production
+ *   NEWS_UPDATE               optional: live = news lists from the live index
+ *                             (default with KV: snapshot every 6 hours)
  *
  * Bindings (wrangler.toml):
  *   COMMERCE_CACHE            KV namespace for the commerce JSON cache
@@ -1172,7 +1179,7 @@ const handleCacheStatus = async (env) => {
  * For manual clearing, Shopify webhooks or an Adobe I/O action. Without the
  * secret the API is off (404).
  */
-const CLEARABLE = /^(products|catalog|prices|ratings)\.json$|^(product|reviews)\/[A-Za-z0-9_-]+\.json$/;
+const CLEARABLE = /^(products|catalog|prices|ratings)\.json$|^(product|reviews)\/[A-Za-z0-9_-]+\.json$|^news$/;
 
 const sha256Hex = async (text) => {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(text));
@@ -1206,7 +1213,23 @@ const handleInvalidate = async (request, env) => {
   }
   if (!['refresh', 'clear'].includes(mode)) return commerceJson({ error: 'mode must be refresh or clear' }, 400);
   if (api !== 'all' && !CLEARABLE.test(api)) {
-    return commerceJson({ error: 'api must be all, products.json, catalog.json, prices.json, ratings.json, product/{sku}.json or reviews/{sku}.json (inventory.json refreshes itself every 10 s)' }, 400);
+    return commerceJson({ error: 'api must be all, products.json, catalog.json, prices.json, ratings.json, product/{sku}.json, reviews/{sku}.json or news (inventory.json refreshes itself every 10 s)' }, 400);
+  }
+
+  // news snapshot: refresh = update the news lists now, clear = retake on next view
+  if (api === 'news') {
+    if (mode === 'clear') {
+      // eslint-disable-next-line no-use-before-define
+      await env.COMMERCE_CACHE.delete(NEWS_SNAPSHOT_KEY);
+      return commerceJson({ mode, api, cleared: true });
+    }
+    try {
+      // eslint-disable-next-line no-use-before-define
+      const result = await takeNewsSnapshot(env, 'manual update');
+      return commerceJson({ mode, api, ...result });
+    } catch (e) {
+      return commerceJson({ mode, api, error: 'The news index could not be read; snapshot kept' }, 502);
+    }
   }
 
   if (mode === 'clear') {
@@ -1471,17 +1494,149 @@ const newsImagePath = (src) => {
   }
 };
 
-// all news articles, newest first; [] when the index can't be read
-const loadNews = async (env) => {
+/*
+ * NEWS EVERY 6 HOURS: a Cron Trigger (wrangler.toml, NEWS_UPDATE_CRON) takes a
+ * snapshot of /news-index.json into KV at 00:00, 06:00, 12:00 and 18:00 IST.
+ * The lists (and /news-index.json itself) are served from that snapshot, so an
+ * article published at 09:00 appears in the News list, Latest and Related at
+ * 12:00 — the same moment for everyone. The article page itself is live at
+ * once. No snapshot yet → one is taken on the first view. Without KV, or with
+ * NEWS_UPDATE=live, the live index is used (new articles within ~1 minute).
+ */
+const NEWS_UPDATE_CRON = '30 0,6,12,18 * * *'; // UTC = 06:00, 12:00, 18:00, 00:00 IST
+const NEWS_UPDATE_HOURS_IST = [0, 6, 12, 18];
+const NEWS_SNAPSHOT_KEY = 'news-index.json';
+const NEWS_STATUS_KEY = 'news-status';
+const NEWS_SNAPSHOT_SECONDS = 7 * 86400; // safety expiry, renewed every 6 hours
+const IST_OFFSET_MINUTES = 330;
+
+const newsSnapshotMode = (env) => Boolean(env.COMMERCE_CACHE) && env.NEWS_UPDATE !== 'live';
+
+const istFormat = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+});
+const istText = (date) => `${istFormat.format(date)} IST`;
+
+// the next update time after `now` (00:00, 06:00, 12:00, 18:00 IST)
+const nextNewsUpdate = (now = new Date()) => {
+  const ist = new Date(now.getTime() + IST_OFFSET_MINUTES * 60000); // IST wall clock in UTC fields
+  for (let day = 0; day < 2; day += 1) {
+    const hour = NEWS_UPDATE_HOURS_IST.find((h) => {
+      const t = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + day, h);
+      return t - IST_OFFSET_MINUTES * 60000 > now.getTime();
+    });
+    if (hour !== undefined) {
+      const istMidnight = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + day);
+      return new Date(istMidnight + hour * 3600000 - IST_OFFSET_MINUTES * 60000);
+    }
+  }
+  return new Date(now.getTime() + 6 * 3600000);
+};
+
+const newsOriginFetch = (env, init = {}) => {
   const headers = {};
   if (env.ORIGIN_AUTHENTICATION) headers.authorization = `token ${env.ORIGIN_AUTHENTICATION}`;
+  return fetch(`https://${env.ORIGIN_HOSTNAME}${NEWS_INDEX}?limit=1000`, { headers, ...init });
+};
+
+const newsRows = (body) => {
   try {
-    const resp = await fetch(`https://${env.ORIGIN_HOSTNAME}${NEWS_INDEX}?limit=1000`, {
-      headers, cf: { cacheEverything: true, cacheTtl: NEWS_INDEX_SECONDS },
-    });
-    if (!resp.ok) return [];
-    const json = await resp.json();
-    return (Array.isArray(json.data) ? json.data : [])
+    const json = JSON.parse(body);
+    return Array.isArray(json.data) ? json.data : [];
+  } catch (e) {
+    return [];
+  }
+};
+
+// reads the live index and saves it as the snapshot → { updatedAt, count, added, removed }
+const takeNewsSnapshot = async (env, trigger = 'scheduled update') => {
+  const resp = await newsOriginFetch(env);
+  if (!resp.ok) throw new Error(`news index answered ${resp.status}`);
+  const body = await resp.text();
+  const rows = newsRows(body);
+  if (!rows.length && !/"data"\s*:/.test(body)) throw new Error('news index is not a sheet');
+  const old = await env.COMMERCE_CACHE.get(NEWS_SNAPSHOT_KEY).catch(() => null);
+  const before = new Set(newsRows(old || '').map((r) => cleanPath(r.path)));
+  const after = new Set(rows.map((r) => cleanPath(r.path)));
+  const updatedAt = new Date().toISOString();
+  await env.COMMERCE_CACHE.put(NEWS_SNAPSHOT_KEY, body, {
+    expirationTtl: NEWS_SNAPSHOT_SECONDS,
+    metadata: { updatedAt, count: rows.length, trigger },
+  });
+  const result = {
+    updatedAt,
+    trigger,
+    count: rows.length,
+    added: old ? rows.filter((r) => !before.has(cleanPath(r.path)))
+      .map((r) => ({ path: cleanPath(r.path), title: String(r.title || '') })) : [],
+    removed: old ? [...before].filter((p) => !after.has(p)) : [],
+  };
+  await env.COMMERCE_CACHE.put(NEWS_STATUS_KEY, JSON.stringify(result));
+  return result;
+};
+
+// the news index body: the snapshot (taken now if missing), or the live index
+const newsIndexBody = async (env) => {
+  if (newsSnapshotMode(env)) {
+    try {
+      const stored = await env.COMMERCE_CACHE.get(NEWS_SNAPSHOT_KEY);
+      if (stored) return stored;
+      await takeNewsSnapshot(env, 'first view');
+      const taken = await env.COMMERCE_CACHE.get(NEWS_SNAPSHOT_KEY);
+      if (taken) return taken;
+    } catch (e) {
+      // KV or the index unavailable → live index below
+    }
+  }
+  const cf = { cacheEverything: true, cacheTtl: NEWS_INDEX_SECONDS };
+  const resp = await newsOriginFetch(env, { cf });
+  return resp.ok ? resp.text() : '';
+};
+
+// GET /news-index.json in snapshot mode: the snapshot, so nothing shows early
+const handleNewsIndex = async (env) => {
+  const body = await newsIndexBody(env);
+  if (!body) return new Response('Not Found', { status: 404 });
+  return new Response(body, {
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': `public, max-age=${NEWS_INDEX_SECONDS}`,
+      'x-news-snapshot': 'every 6 hours',
+    },
+  });
+};
+
+// GET /news-status.json — last and next update, articles added (demo)
+const handleNewsStatus = async (env) => {
+  const json = (body) => new Response(JSON.stringify(body), {
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  });
+  if (!newsSnapshotMode(env)) return json({ mode: 'live', note: 'news lists use the live index (new articles within ~1 minute)' });
+  const [stored, last] = await Promise.all([
+    env.COMMERCE_CACHE.getWithMetadata(NEWS_SNAPSHOT_KEY).catch(() => null),
+    env.COMMERCE_CACHE.get(NEWS_STATUS_KEY, { type: 'json' }).catch(() => null),
+  ]);
+  const meta = stored && stored.value ? stored.metadata || {} : null;
+  const next = nextNewsUpdate();
+  return json({
+    mode: 'every 6 hours',
+    updateTimes: '00:00, 06:00, 12:00, 18:00 IST',
+    snapshot: meta ? {
+      updatedAt: meta.updatedAt,
+      updatedAtIST: meta.updatedAt ? istText(new Date(meta.updatedAt)) : null,
+      articles: meta.count,
+      trigger: meta.trigger,
+    } : null,
+    nextUpdate: next.toISOString(),
+    nextUpdateIST: istText(next),
+    lastUpdate: last,
+  });
+};
+
+// all news articles, newest first; [] when the index can't be read
+const loadNews = async (env) => {
+  try {
+    return newsRows(await newsIndexBody(env))
       .filter((row) => row.path && row.title)
       .map((row) => ({
         path: cleanPath(row.path),
@@ -1661,6 +1816,14 @@ const handleRequest = async (request, env) => {
     return handleCommerce(request, url, env);
   }
 
+  // NEWS EVERY 6 HOURS: status, and the index from the snapshot
+  if (url.pathname === '/news-status.json') {
+    return handleNewsStatus(env);
+  }
+  if (url.pathname === NEWS_INDEX && newsSnapshotMode(env) && ['GET', 'HEAD'].includes(request.method)) {
+    return handleNewsIndex(env);
+  }
+
   // LOCKED PAGES: /premium/* and /members/* only for signed-in visitors
   const locked = isLockedPath(url.pathname);
   if (locked && !(await isSignedIn(request, env))) {
@@ -1763,6 +1926,11 @@ export default {
       // eslint-disable-next-line no-console
       console.log(`${name} watcher: ${e.message}`);
     };
+    // NEWS EVERY 6 HOURS: its own Cron Trigger only takes the news snapshot
+    if (event && event.cron === NEWS_UPDATE_CRON) {
+      if (env.COMMERCE_CACHE) ctx.waitUntil(takeNewsSnapshot(env).catch(log('news')));
+      return;
+    }
     // reviews after products: they use the (refreshed) catalog's SKUs
     ctx.waitUntil(checkCommerce(env, 'watcher').catch(log('commerce'))
       .then(() => checkReviews(env, 'watcher').catch(log('reviews'))));

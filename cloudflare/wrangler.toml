@@ -22,7 +22,10 @@ keep_vars = true
 binding = "COMMERCE_CACHE"
 id = "f633f779e83444a1b5ee0154096c1e3b"
 
-# commerce change watcher: compares Shopify with the cached JSON every minute
-# and refreshes the cache when anything changed (worker.mjs → scheduled)
+# Cron Triggers (worker.mjs → scheduled), times in UTC:
+#   "* * * * *"           commerce change watcher: compares Shopify with the
+#                         cached JSON every minute, refreshes what changed
+#   "30 0,6,12,18 * * *"  news update: snapshot of /news-index.json at 06:00,
+#                         12:00, 18:00 and 00:00 IST (UTC 00:30, 06:30, 12:30, 18:30)
 [triggers]
-crons = ["* * * * *"]
+crons = ["* * * * *", "30 0,6,12,18 * * *"]
